@@ -22,3 +22,10 @@ dist/
 
 # Temporary files
 *.tmp
+
+# Local research sources
+references/*.pdf
+
+# Local Codex/project memory
+local_context/
+AGENTS.md
