@@ -1,0 +1,34 @@
+# Teaching scenario assumptions for the first aggregate FCR experiment.
+# These provider values are not inferred from generator MVA ratings or claimed
+# to represent physical headroom. A future reserve market will allocate q_star.
+
+[scenario]
+power_deficit_mw = 10.0
+event_time_s = 1.0
+final_time_s = 40.0
+output_time_step_s = 0.05
+load_frequency_sensitivity = 1.0
+
+[[providers]]
+provider_id = "provider_1"
+gain_mw_per_hz = 10.0
+time_constant_s = 0.4
+reserve_mw = 1.0
+
+[[providers]]
+provider_id = "provider_2"
+gain_mw_per_hz = 15.0
+time_constant_s = 0.8
+reserve_mw = 2.0
+
+[[providers]]
+provider_id = "provider_3"
+gain_mw_per_hz = 20.0
+time_constant_s = 1.5
+reserve_mw = 3.0
+
+[[providers]]
+provider_id = "provider_4"
+gain_mw_per_hz = 25.0
+time_constant_s = 3.0
+reserve_mw = 4.0

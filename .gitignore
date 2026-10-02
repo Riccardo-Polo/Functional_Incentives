@@ -29,3 +29,6 @@ references/*.pdf
 # Local Codex/project memory
 local_context/
 AGENTS.md
+
+# csv files
+*.csv

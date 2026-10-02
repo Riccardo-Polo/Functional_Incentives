@@ -11,6 +11,46 @@ from functional_incentives.grid.aggregate_frequency import (
 
 
 class AggregateFrequencyTests(unittest.TestCase):
+    def test_non_finite_physical_parameters_are_rejected(self) -> None:
+        valid_parameters = {
+            "nominal_frequency_hz": 60.0,
+            "equivalent_inertia_s": 2.0,
+            "synchronous_rating_mva": 1000.0,
+            "load_damping_mw_per_hz": 20.0,
+        }
+        for field in valid_parameters:
+            for value in (float("nan"), float("inf"), float("-inf")):
+                with self.subTest(field=field, value=value):
+                    with self.assertRaises(ValueError):
+                        LinearFrequencyParameters(**{**valid_parameters, field: value})
+
+    def test_non_finite_damping_inputs_are_rejected(self) -> None:
+        valid_inputs = {
+            "load_mw": 1000.0,
+            "nominal_frequency_hz": 60.0,
+            "per_unit_load_change_per_unit_frequency_change": 1.0,
+        }
+        for field in valid_inputs:
+            for value in (float("nan"), float("inf"), float("-inf")):
+                with self.subTest(field=field, value=value):
+                    with self.assertRaises(ValueError):
+                        damping_from_load_sensitivity(**{**valid_inputs, field: value})
+
+    def test_analytical_simulation_rejects_non_finite_inputs(self) -> None:
+        parameters = LinearFrequencyParameters(60.0, 2.0, 1000.0, 20.0)
+        valid_inputs = {
+            "power_deficit_mw": 10.0,
+            "power_response_mw": 0.0,
+            "start_time_s": 1.0,
+            "final_time_s": 2.0,
+            "time_step_s": 0.1,
+        }
+        for field in valid_inputs:
+            for value in (float("nan"), float("inf"), float("-inf")):
+                with self.subTest(field=field, value=value):
+                    with self.assertRaises(ValueError):
+                        simulate_power_step(parameters, **{**valid_inputs, field: value})
+
     def test_frequency_mass_and_initial_rocof(self) -> None:
         parameters = LinearFrequencyParameters(
             nominal_frequency_hz=60.0,
