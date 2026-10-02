@@ -14,11 +14,7 @@ and model parameters. It then represents the system with one shared frequency
 and four individual provider responses. A permanent 10 MW shortage starts at
 1 s, and the experiment runs to 40 s on the case's native 60 Hz base.
 
-The numerical FCR example is implemented. The time-grid and output-label bugs
-found in the 2026-10-02 review are fixed, with regression coverage for custom
-output intervals and short events near the final time. Both simulators now
-use identical timestamps including the exact requested endpoint. See the
-[review and resolution record](docs/FCR_REVIEW_2026-10-02.md). The reserve market
+The numerical FCR example is implemented. The reserve market
 and providers' economic decisions are not implemented yet.
 
 ## What the equations mean
@@ -40,7 +36,7 @@ Each provider requests a response proportional to the frequency error, with a
 reserve limit, and gradually moves towards that request:
 
 $$
-r_i=\operatorname{clip}(-K_i\Delta f,-q_i^\star,q_i^\star),
+r_i=\text{clip}(-K_i\Delta f,-q_i^\star,q_i^\star),
 \qquad
 T_i\frac{du_i}{dt}=r_i-u_i.
 $$
