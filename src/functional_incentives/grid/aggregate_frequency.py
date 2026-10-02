@@ -16,6 +16,9 @@ deficit.  With MW, Hz and seconds, the model is
     M_f d(delta_f)/dt = -D delta_f - deficit + response,
 
 where ``M_f = 2 H_eq S_sync / f_nominal`` in MW s/Hz and ``D`` is in MW/Hz.
+In ``simulate_power_step``, the response and deficit remain constant after
+activation. The instantaneous derivative also supports changing inputs and is
+reused by the numerical FCR simulator.
 """
 
 from __future__ import annotations
@@ -24,6 +27,8 @@ from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import NDArray
+
+from functional_incentives.time_grid import make_output_times
 
 
 @dataclass(frozen=True)
@@ -36,6 +41,14 @@ class LinearFrequencyParameters:
     load_damping_mw_per_hz: float
 
     def __post_init__(self) -> None:
+        for name in (
+            "nominal_frequency_hz",
+            "equivalent_inertia_s",
+            "synchronous_rating_mva",
+            "load_damping_mw_per_hz",
+        ):
+            if not np.isfinite(getattr(self, name)):
+                raise ValueError(f"{name} must be finite")
         if self.nominal_frequency_hz <= 0.0:
             raise ValueError("nominal_frequency_hz must be positive")
         if self.equivalent_inertia_s <= 0.0:
@@ -98,10 +111,21 @@ def simulate_power_step(
 
     The deficit and response both start at ``start_time_s``.  The closed-form
     solution keeps this first learning model transparent and avoids numerical
-    integration error.  A later FCR controller with a time-varying response can
-    reuse :func:`frequency_derivative_hz_per_s` in an ODE solver.
+    integration error. The FCR simulator reuses
+    :func:`frequency_derivative_hz_per_s` for its time-varying responses.
+    Output includes the exact final time, with a shorter last interval when
+    the horizon is not a multiple of ``time_step_s``.
     """
 
+    for name, value in (
+        ("power_deficit_mw", power_deficit_mw),
+        ("power_response_mw", power_response_mw),
+        ("start_time_s", start_time_s),
+        ("final_time_s", final_time_s),
+        ("time_step_s", time_step_s),
+    ):
+        if not np.isfinite(value):
+            raise ValueError(f"{name} must be finite")
     if power_deficit_mw < 0.0:
         raise ValueError("power_deficit_mw cannot be negative")
     if power_response_mw < 0.0:
@@ -113,7 +137,7 @@ def simulate_power_step(
     if time_step_s <= 0.0:
         raise ValueError("time_step_s must be positive")
 
-    time_s = np.arange(0.0, final_time_s + 0.5 * time_step_s, time_step_s)
+    time_s = make_output_times(final_time_s, time_step_s)
     elapsed_s = np.maximum(time_s - start_time_s, 0.0) # time elapsed since the disturbance started
     step_is_active = time_s >= start_time_s
 
@@ -155,6 +179,16 @@ def damping_from_load_sensitivity(
     D = alpha * P_load / f_nominal, in MW/Hz, where alpha is the per-unit sensitivity.
     """
 
+    for name, value in (
+        ("load_mw", load_mw),
+        ("nominal_frequency_hz", nominal_frequency_hz),
+        (
+            "per_unit_load_change_per_unit_frequency_change",
+            per_unit_load_change_per_unit_frequency_change,
+        ),
+    ):
+        if not np.isfinite(value):
+            raise ValueError(f"{name} must be finite")
     if load_mw < 0.0:
         raise ValueError("load_mw cannot be negative")
     if nominal_frequency_hz <= 0.0:
