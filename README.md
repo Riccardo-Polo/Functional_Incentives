@@ -107,7 +107,8 @@ Restoring exactly 60 Hz would require a later secondary-control model.
 
 ## Next development stage
 
-The proposed next stage is the simplified Week 3 FCR capacity market:
+The next requested stage is to implement the provider decision process that
+creates offers, then clear the simplified Week 3 FCR capacity market:
 
 $$
 \min_{\{q_i\}}\sum_i c_iq_i
@@ -115,14 +116,21 @@ $$
 \sum_i q_i\ge Q_{\mathrm{req}},\qquad 0\le q_i\le\bar q_i.
 $$
 
-A provider offers capacity $\bar q_i$ at bid price $c_i$. The auction chooses
-awards $q_i^\star$; an explicit pricing rule determines $\lambda^\star$.
-Awards then become the reserve limits used by the existing dynamic model.
+A provider decides what capacity $\bar q_i$ to offer and at what bid price
+$c_i$, using explicitly modelled assumptions about costs, expectations and
+behaviour. The auction then chooses awards $q_i^\star$; an explicit pricing
+rule determines $\lambda^\star$. Awards become the reserve limits used by the
+existing dynamic model. After this market/provider-decision layer is in place,
+the following requested stage is to implement the functional incentive.
 
-The supervisor's suggested extension is to explain how each provider chooses
-its bid. This requires a cost and decision model: the slides specify $c_i$ as
-a bid, but do not derive it. The [market and provider-decision plan](docs/FCR_MARKET_PLAN.md)
-sets out the equations, proposed implementation order, and choices still open.
+The slides specify $c_i$ as a bid, but do not derive it. Supervisors also
+advised that $K_i$ should be consistent across generators and related to machine
+size $S_i$, mentioning a normalized proportion associated with 5% droop
+($1/0.05$). The precise calibration (including the rating/frequency base and
+whether reserve saturation scales with size) is unresolved; current $K_i$ and
+$q_i^\star$ remain scenario assumptions. The [market and provider-decision
+plan](docs/FCR_MARKET_PLAN.md) records the interpretation and implementation
+order, while [FCR_MODEL.md](docs/FCR_MODEL.md) explains the dimensional issue.
 
 ## Research context and sources
 

@@ -1,6 +1,6 @@
 # Understanding the aggregate FCR example
 
-Reviewed on 2026-10-02. This guide describes the implemented teaching scenario.
+Reviewed on 2026-10-02; supervisor guidance added on 2026-10-08. This guide describes the implemented teaching scenario.
 The [review](FCR_REVIEW_2026-10-02.md) records the sampling bugs found outside
 the default configuration and their fixes; the [market plan](FCR_MARKET_PLAN.md)
 describes future work.
@@ -88,6 +88,32 @@ $$
 $K_i$ sets the response requested per Hz of frequency error; $T_i$ determines
 how quickly the delivered response follows it. For a constant request, after
 one $T_i$ about 63% of the initial gap to that request has closed.
+
+### Size-based droop calibration: supervisor guidance, formula open
+
+In the 2026-10-08 Week 4 review, supervisors asked for generator droop gains
+to be consistent across the fleet and correlated with generator size $S_i$.
+They suggested that $K_i$ could be proportional to $S_i$, with a normalized
+proportion associated with 5% droop ($1/0.05$). This guidance is not yet a
+calibrated parameter rule, and the current teaching values remain scenario
+assumptions.
+
+Under the conventional per-unit droop definition
+$\Delta P_i/S_i = -(1/R_i)\Delta f/f_N$, choosing $R_i=0.05$ implies
+$K_i=S_i/(0.05 f_N)$ in MW/Hz when $S_i$ is treated numerically in MVA and
+active-power response is represented in MW. This supplies a possible
+size-proportional gain rule, but it does not by itself define the saturation
+level. If reserve is also assigned proportionally as $q_i^\star=\rho S_i$,
+then the normalized gain-to-reserve relation depends on $\rho$ and $f_N$;
+$K_i/q_i^\star$ is not simply the dimensionless number $1/0.05$.
+
+Before adopting a fleet rule, record whether $S_i$ means machine MVA rating,
+active-power base, or another size measure; whether 5% is defined relative to
+nominal frequency (50/60 Hz), a specified full-activation frequency deviation,
+or a reserve fraction; and whether reserve saturation should scale with size
+or continue to come from the market award. Keep gain, physical capability,
+market allocation, and response saturation distinct. Do not apply this
+candidate formula silently to existing simulations or market awards.
 
 For provider 1, $K_1=10$ MW/Hz, $T_1=0.4$ s and $q_1^\star=1$ MW. If
 $\Delta f=-0.1$ Hz, the request is 1 MW. If $u_1=0.2$ MW at that instant,

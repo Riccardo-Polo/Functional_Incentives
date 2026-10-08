@@ -1,6 +1,6 @@
 # Next stage: the FCR market and provider decisions
 
-**Status: proposal for the next implementation, 2026-10-02.** No market or
+**Status: proposal for the next implementation, updated 2026-10-08.** No market or
 economic provider model has been implemented. Source equations and additional
 modelling proposals are distinguished below; none of the proposed choices is
 recorded as an accepted economic decision yet.
@@ -241,28 +241,57 @@ follower model; it is not automatically the capacity bid $c_i$.
    an exact-endpoint output grid, non-finite parameters are rejected and final
    time labels follow the configuration. Regression tests cover the reviewed
    failures. See the [resolution record](FCR_REVIEW_2026-10-02.md).
-2. **Specify provider capability, cost and price units.** Keep physical capacity,
-   offered capacity, awarded capacity and delivered power distinct. Choose
-   price-taking or strategic behaviour explicitly. Teaching costs are acceptable
-   for a first example if clearly labelled.
-3. **Implement the auction with fixed test bids.** Put allocation, pricing and
-   capacity payments in a market module. Check the worked example, partial
-   awards, ties, zero requirement, exact total capacity and insufficient supply.
-4. **Implement provider decisions.** Put cost functions and offer construction
-   in provider modules. Test nonparticipation when expected revenue cannot cover
-   cost, the selected cost-to-bid rule, and sensitivity to opportunity costs.
+2. **Specify provider decisions and their inputs.** Define capability, costs,
+   price units, information/expectations, and whether providers are price-taking
+   or strategic. Label any teaching assumptions. Keep physical capacity,
+   offered capacity, awarded capacity and delivered power distinct.
+3. **Implement provider offer construction.** Produce each $(\bar q_i,c_i)$
+   before market clearing, from the declared provider decision rule.
+4. **Implement and check the auction.** Clear the resulting bids, with allocation,
+   pricing and capacity payments in a market module. Validate with fixed test
+   bids first, including partial awards, ties, zero requirement, exact total
+   capacity and insufficient supply.
 5. **Connect awards to dynamics.** Set each provider's `reserve_mw` from its award
    by provider ID. Hold the award fixed during the event. Compare manual awards,
    fixed-bid awards and cost-derived awards under the same physical disturbance.
 6. **Report physical and economic outcomes.** Show frequency, each response,
    offered/awarded reserve, clearing price, payments, true costs and profit.
    Use separate capacity and response records so that no capacity is paid twice.
+7. **Then implement the functional incentive** as a separate mechanism, keeping
+   market procurement distinct from later incentive payments or response policies.
 
 Keep the accepted $K_i,T_i$ fixed when first connecting the auction: the award
 changes the saturation limit. A common full-activation frequency would instead
 imply a rule such as $K_i=q_i^\star/\Delta f_{\mathrm{full}}$; adopting that would
 be a new control-policy decision and must not happen silently. A zero award
 gives zero response from a provider initialized at $u_i=0$.
+
+### Supervisor guidance from the Week 4 review (2026-10-08)
+
+Supervisors asked that droop gains be related consistently across generators,
+with $K_i$ correlated with machine size $S_i$. They mentioned a normalized
+proportion of $1/0.05$ (5% droop) and suggested $K_i$ proportional to $S_i$.
+They also raised a relationship between machine size and the provider's input
+saturation; the notes do not specify the functional relationship.
+This is a modelling direction to resolve before implementation, not an adopted
+change to the Week 3 response law or the current teaching parameters.
+
+One conventional interpretation is
+$\Delta P_i/S_i = -(1/R_i)\Delta f/f_N$, giving
+$K_i=S_i/(R_i f_N)$ and $R_i=0.05$. In this interpretation, 5% is relative to
+nominal frequency, so it must be converted to Hz for the current MW/Hz gain.
+It does not determine $q_i^\star$; market-awarded reserve remains the
+saturation limit unless supervisors decide otherwise. If the intended meaning
+was instead a common gain-to-reserve slope or a specified full-response
+frequency deviation, that produces a different formula. These interpretations
+must not be conflated.
+
+Before coding the rule, settle: (1) rating basis for $S_i$ (MVA or MW),
+(2) nominal frequency $f_N$, (3) whether 5% is conventional per-unit droop,
+reserve utilization, or a full-activation frequency band, and (4) whether
+reserve/physical headroom also scales with size. Until then keep the current
+$K_i$ values labelled as scenario assumptions and do not derive bids,
+capability, or awards from them.
 
 The proposed software separation is `providers` for capability, costs and
 offers; `markets` for clearing and payment; the existing `grid` and provider
