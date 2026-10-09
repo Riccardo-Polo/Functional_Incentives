@@ -32,3 +32,6 @@ AGENTS.md
 
 # csv files
 *.csv
+
+# Reproducible experiment outputs
+/results/

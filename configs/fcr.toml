@@ -1,0 +1,149 @@
+# Illustrative 3-conventional / 2-renewable fleet, not calibrated market data.
+# Same PJM network and 1000 MW load; solve the new dispatch before each event.
+# Conventional units contribute inertia; renewables have no synthetic inertia.
+# The two renewables differ ONLY in reserve variance and network connection.
+# All providers face the SAME 200 EUR per missing MW penalty for the whole block.
+# Positive OFFERS start at 1 MW. Clearing remains divisible (partial awards).
+# This minimum matters: without it, tiny profitable offers can survive the risk.
+
+[scenario]
+operating_point = "configured_fleet"
+power_base = "machine_rating"
+droop_pu = 0.05
+power_deficit_mw = 10.0
+event_time_s = 1.0
+final_time_s = 40.0
+output_time_step_s = 0.05
+load_frequency_sensitivity = 1.0
+seed = 20261008
+
+[decision]
+mode = "optimize"  # or fixed, with per-provider fixed bid and offer
+quantity_tolerance_mw = 1e-8  # absolute tolerance for bounded quantity optimization
+
+[market]
+mode = "clear"  # or fixed, with per-provider awards and an explicit price
+requirement_mw = 12.0
+minimum_bid_mw = 1.0  # positive offers only; partial awards can be smaller
+block_duration_hours = 4.0
+
+[availability]
+boundary_mode = "truncated"
+
+[[providers]]
+provider_id = "conventional_1"
+generator_id = "conventional_1"
+technology = "conventional"
+bus_id = 0
+rating_mva = 300.0
+power_setpoint_mw = 260.0
+inertia_s = 5.0
+minimum_power_mw = 50.0
+maximum_power_mw = 280.0
+reserve_capacity_mw = 4.0
+reserve_safety_margin_fraction = 0.0  # extra bidding margin, NOT physical headroom
+time_constant_s = 2.0
+mean_mw = 3.98
+variance_mw2 = 0.0004
+linear_cost_eur_per_mw_block = 3.0
+quadratic_cost_eur_per_mw2_block = 0.5
+penalty_eur_per_missing_mw_block = 200.0
+minimum_bid_price_eur_per_mw_block = 10.0
+maximum_bid_price_eur_per_mw_block = 15.0
+
+[[providers]]
+provider_id = "conventional_2"
+generator_id = "conventional_2"
+technology = "conventional"
+bus_id = 2
+rating_mva = 400.0
+power_setpoint_mw = 310.0
+inertia_s = 4.0
+minimum_power_mw = 60.0
+maximum_power_mw = 380.0
+reserve_capacity_mw = 4.0
+reserve_safety_margin_fraction = 0.0  # extra bidding margin, NOT physical headroom
+time_constant_s = 3.0
+mean_mw = 3.98
+variance_mw2 = 0.0004
+linear_cost_eur_per_mw_block = 4.0
+quadratic_cost_eur_per_mw2_block = 0.5
+penalty_eur_per_missing_mw_block = 200.0
+minimum_bid_price_eur_per_mw_block = 12.0
+maximum_bid_price_eur_per_mw_block = 18.0
+
+[[providers]]
+provider_id = "conventional_3"
+generator_id = "conventional_3"
+technology = "conventional"
+bus_id = 3
+rating_mva = 400.0
+# A slack initialization guess: the solved output balances the system and losses.
+power_setpoint_mw = 250.0
+is_slack = true
+inertia_s = 4.0
+minimum_power_mw = 60.0
+maximum_power_mw = 380.0
+reserve_capacity_mw = 4.0
+reserve_safety_margin_fraction = 0.0  # extra bidding margin, NOT physical headroom
+time_constant_s = 4.0
+mean_mw = 3.98
+variance_mw2 = 0.0004
+linear_cost_eur_per_mw_block = 5.0
+quadratic_cost_eur_per_mw2_block = 0.5
+penalty_eur_per_missing_mw_block = 200.0
+minimum_bid_price_eur_per_mw_block = 16.0
+maximum_bid_price_eur_per_mw_block = 24.0
+
+[[providers]]
+provider_id = "renewable_reliable"
+generator_id = "renewable_reliable"
+technology = "renewable"
+bus_id = 4
+rating_mva = 150.0
+power_setpoint_mw = 90.0
+inertia_s = 0.0
+minimum_power_mw = 0.0
+maximum_power_mw = 120.0
+reserve_capacity_mw = 4.0
+reserve_safety_margin_fraction = 0.0  # extra bidding margin, NOT physical headroom
+time_constant_s = 0.25
+mean_mw = 2.0
+variance_mw2 = 0.04
+linear_cost_eur_per_mw_block = 5.0
+quadratic_cost_eur_per_mw2_block = 1.0
+penalty_eur_per_missing_mw_block = 200.0
+minimum_bid_price_eur_per_mw_block = 10.0
+maximum_bid_price_eur_per_mw_block = 20.0
+
+[[providers]]
+provider_id = "renewable_uncertain"
+generator_id = "renewable_uncertain"
+technology = "renewable"
+bus_id = 1
+rating_mva = 150.0
+power_setpoint_mw = 90.0
+inertia_s = 0.0
+minimum_power_mw = 0.0
+maximum_power_mw = 120.0
+reserve_capacity_mw = 4.0
+reserve_safety_margin_fraction = 0.0  # extra bidding margin, NOT physical headroom
+time_constant_s = 0.25
+mean_mw = 2.0
+variance_mw2 = 4.0
+linear_cost_eur_per_mw_block = 5.0
+quadratic_cost_eur_per_mw2_block = 1.0
+penalty_eur_per_missing_mw_block = 200.0
+minimum_bid_price_eur_per_mw_block = 10.0
+maximum_bid_price_eur_per_mw_block = 20.0
+
+# --compare uses these overrides through the same implementation.
+[[comparisons]]
+name = "no_penalty"
+label = "No penalty (all providers)"
+all_providers = { penalty_eur_per_missing_mw_block = 0.0 }
+
+[[comparisons]]
+name = "lower_uncertainty"
+label = "Uncertain renewable: lower uncertainty"
+providers = { renewable_uncertain = { variance_mw2 = 0.04 } }

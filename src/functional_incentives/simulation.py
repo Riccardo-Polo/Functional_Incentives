@@ -1,20 +1,116 @@
-"""Numerical simulation of aggregate frequency and individual FCR providers."""
+"""Prepare one reserve block and evolve frequency and individual provider states."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Mapping, Sequence
 
 import numpy as np
 from numpy.typing import NDArray
 from scipy.integrate import solve_ivp
 
-from functional_incentives.grid.aggregate_frequency import (
-    LinearFrequencyParameters,
-    frequency_derivative_hz_per_s,
+from .frequency import LinearFrequencyParameters, frequency_derivative_hz_per_s, make_output_times
+from .providers import BlockProvider, FCRProviderParameters, droop_gain_mw_per_hz
+from .decision import OfferDecision, choose_capacity_offer, evaluate_offer
+from .market import (
+    FCRCapacityOffer, FCRMarketResult, ReserveSettlement,
+    clear_fcr_market, fixed_capacity_allocation, settle_reserve_block,
 )
-from functional_incentives.providers.fcr import FCRProviderParameters
-from functional_incentives.time_grid import make_output_times
+
+
+@dataclass(frozen=True)
+class PreparedFCRBlock:
+    providers: tuple[BlockProvider, ...]
+    decisions: tuple[OfferDecision, ...]
+    market: FCRMarketResult
+    settlements: tuple[ReserveSettlement, ...]
+    response_parameters: tuple[FCRProviderParameters, ...]
+
+    @property
+    def operating_powers_mw(self) -> tuple[float, ...]:
+        return tuple(p.operating_power_mw for p in self.providers)
+
+
+def prepare_fcr_block(
+    providers: Sequence[BlockProvider],
+    *,
+    requirement_mw: float,
+    nominal_frequency_hz: float,
+    rng: np.random.Generator,
+    droop_pu: float = 0.05,
+    minimum_bid_mw: float = 1.0,
+    quantity_tolerance_mw: float = 1e-8,
+    fixed_offers: Sequence[FCRCapacityOffer] | None = None,
+    fixed_awards_mw: Mapping[str, float] | None = None,
+    fixed_price_eur_per_mw_block: float | None = None,
+) -> PreparedFCRBlock:
+    """Decide, clear, then sample exactly once per provider in stable ID order.
+
+    Decisions use the known availability distribution, never the sampled state.
+    No draw is made when procurement is infeasible. Keep the returned block
+    when comparing solver tolerances; resampling would change the experiment.
+    """
+    if not np.isfinite(minimum_bid_mw) or minimum_bid_mw <= 0:
+        raise ValueError("minimum_bid_mw must be finite and positive")
+    ordered = tuple(sorted(providers, key=lambda p: p.provider_id))
+    for ids in ([p.provider_id for p in ordered], [p.generator_id for p in ordered]):
+        if len(ids) != len(set(ids)):
+            raise ValueError("provider and generator identities must be unique")
+    gains = {
+        p.provider_id: (droop_gain_mw_per_hz(p.power_base_mw, nominal_frequency_hz, droop_pu)
+                        if p.gain_mw_per_hz is None else p.gain_mw_per_hz)
+        for p in ordered
+    }
+    if fixed_offers is None:
+        decisions = tuple(
+            choose_capacity_offer(
+                p.provider_id, availability=p.availability, cost=p.cost,
+                penalty_eur_per_missing_mw_block=p.penalty_eur_per_missing_mw_block,
+                minimum_bid_price_eur_per_mw_block=p.minimum_bid_price_eur_per_mw_block,
+                maximum_bid_price_eur_per_mw_block=p.maximum_bid_price_eur_per_mw_block,
+                maximum_offer_mw=p.maximum_offer_mw, minimum_bid_mw=minimum_bid_mw,
+                quantity_tolerance_mw=quantity_tolerance_mw,
+            ) for p in ordered
+        )
+    else:
+        offers_by_id = {o.provider_id: o for o in fixed_offers}
+        if len(offers_by_id) != len(fixed_offers) or set(offers_by_id) != {p.provider_id for p in ordered}:
+            raise ValueError("fixed offers require exactly the provider identities")
+        decisions = tuple(evaluate_offer(
+            offers_by_id[p.provider_id], availability=p.availability, cost=p.cost,
+            penalty_eur_per_missing_mw_block=p.penalty_eur_per_missing_mw_block,
+        ) for p in ordered)
+    offers = [d.offer for d in decisions]
+    for p, offer in zip(ordered, offers, strict=True):
+        if offer.quantity_mw != 0 and not minimum_bid_mw <= offer.quantity_mw <= p.maximum_offer_mw:
+            raise ValueError(f"{p.provider_id}: offer must be zero or between minimum bid and maximum offer")
+    if fixed_awards_mw is None:
+        if fixed_price_eur_per_mw_block is not None:
+            raise ValueError("a fixed price requires fixed awards")
+        market = clear_fcr_market(offers, requirement_mw)
+    else:
+        if fixed_price_eur_per_mw_block is None:
+            raise ValueError("fixed awards require an explicit price")
+        market = fixed_capacity_allocation(
+            offers, requirement_mw, fixed_awards_mw, fixed_price_eur_per_mw_block)
+    if not market.feasible:
+        raise ValueError(f"Insufficient offered reserve: shortage {market.shortage_mw:g} MW")
+    awards_by_id = {award.provider_id: award for award in market.awards}
+    settlements = tuple(
+        settle_reserve_block(
+            awards_by_id[p.provider_id],
+            available_mw=p.availability.sample_mw(rng),
+            cost=p.cost,
+            penalty_eur_per_missing_mw_block=p.penalty_eur_per_missing_mw_block,
+        ) for p in ordered
+    )
+    response_parameters = tuple(
+        FCRProviderParameters(
+            provider_id=p.provider_id, gain_mw_per_hz=gains[p.provider_id],
+            time_constant_s=p.time_constant_s, reserve_mw=settled.effective_reserve_mw,
+        ) for p, settled in zip(ordered, settlements, strict=True)
+    )
+    return PreparedFCRBlock(ordered, decisions, market, settlements, response_parameters)
 
 
 @dataclass(frozen=True)
@@ -24,13 +120,13 @@ class AggregateFCRTrajectory:
     time_s: NDArray[np.float64]
     delta_frequency_hz: NDArray[np.float64]
     frequency_hz: NDArray[np.float64]
-    power_deficit_mw: NDArray[np.float64] # disturbance
+    power_deficit_mw: NDArray[np.float64]
     provider_ids: tuple[str, ...]
-    provider_requested_response_mw: NDArray[np.float64] # responsed requested from FCR
-    provider_response_mw: NDArray[np.float64]           #effective response from providers
-    provider_reserve_mw: NDArray[np.float64]            # limit qstar
+    provider_requested_response_mw: NDArray[np.float64]
+    provider_response_mw: NDArray[np.float64]
+    provider_reserve_mw: NDArray[np.float64]  # effective physical limits
     total_response_mw: NDArray[np.float64]
-    provider_active_power_mw: NDArray[np.float64] | None #sum of P+u
+    provider_active_power_mw: NDArray[np.float64] | None  # P_i,0 + u_i
     solver_message: str
 
 
@@ -119,7 +215,7 @@ def simulate_fcr_power_step(
             parameters=parameters,
         )
 
-        # du_i/dt = (clip(-K_i * delta_f, -q_i_star, q_i_star) - u_i) / T_i
+        # du_i/dt = (clip(-K_i * delta_f, -reserve_i, reserve_i) - u_i) / T_i
         for provider_index, provider in enumerate(provider_tuple):
             derivative[provider_index + 1] = provider.response_derivative_mw_per_s(
                 float(provider_response_mw[provider_index]),

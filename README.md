@@ -1,143 +1,251 @@
 # Functional Incentives for Frequency Control
 
-Semester Project — ETH Zürich, Automatic Control Laboratory.
+ETH Zürich semester project. The current implementation covers **provider
+decisions, the FCR capacity market, and frequency dynamics**.
 
-The project studies how payments can encourage flexible resources to help keep
-electricity supply and demand balanced. The long-term comparison is between
-contracted frequency reserves and additional response encouraged by functional
-incentives: payments that depend on the system state and the provider's action.
+## Run
 
-## Current implementation
-
-The teaching example uses the ANDES PJM 5-bus case to establish initial powers
-and model parameters. It then represents the system with one shared frequency
-and four individual provider responses. A permanent 10 MW shortage starts at
-1 s, and the experiment runs to 40 s on the case's native 60 Hz base.
-
-The numerical FCR example is implemented. The reserve market
-and providers' economic decisions are not implemented yet.
-
-## What the equations mean
-
-Write frequency relative to its nominal value as $\Delta f=f-f_N$. A positive
-deficit $d$ lowers frequency; a positive provider response $u_i$ adds power:
-
-$$
-M_f\frac{d\Delta f}{dt}=-D\Delta f-d+\sum_i u_i,
-\qquad
-M_f=\frac{2H_{\mathrm{eq}}S_{\mathrm{sync}}}{f_N}.
-$$
-
-$M_f$ describes resistance to a rapid frequency change. $D$ describes how load
-changes with frequency. Power is in MW, frequency in Hz, and time in seconds;
-$S_{\mathrm{sync}}$ is the synchronous machine rating in MVA.
-
-Each provider requests a response proportional to the frequency error, with a
-reserve limit, and gradually moves towards that request:
-
-$$
-r_i=\text{clip}(-K_i\Delta f,-q_i^\star,q_i^\star),
-\qquad
-T_i\frac{du_i}{dt}=r_i-u_i.
-$$
-
-- $K_i$ [MW/Hz] controls how strongly the provider responds to a frequency error.
-- $T_i$ [s] controls how quickly its actual response approaches the request.
-- $q_i^\star$ [MW] limits the request in either direction.
-
-The response is a change around the initial power: $P_i(t)=P_{i,0}+u_i(t)$.
-The current reserve limits are manually assigned teaching values. They have
-not been checked against sourced generator minimum and maximum power limits.
-See the [model and code guide](docs/FCR_MODEL.md) for a worked explanation.
-
-## Run the example
-
-Python 3.11 or newer is required; the current local environment uses 3.12.
-From the repository root, on Windows PowerShell:
+Python 3.11+ is required. From the repository root in PowerShell:
 
 ~~~powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e .
-.\.venv\Scripts\python.exe scripts\run_pjm5_fcr_teaching.py
+.\.venv\Scripts\python.exe scripts\run_fcr.py
+~~~
+
+There is one runner and one default configuration:
+[configs/fcr.toml](configs/fcr.toml). The default fleet has three conventional
+and two renewable generators on the PJM 5-bus network.
+
+~~~powershell
+# Base scenario plus the configured penalty/uncertainty comparisons
+.\.venv\Scripts\python.exe scripts\run_fcr.py --compare
+
+# One named scenario
+.\.venv\Scripts\python.exe scripts\run_fcr.py --scenario no_penalty --output-dir results\no_penalty
+
+# Different parameters, seed or destination
+.\.venv\Scripts\python.exe scripts\run_fcr.py --config configs\fcr.toml --seed 123 --output-dir results\my_run
+
+# Current test suite
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ~~~
 
-The experiment reads [pjm5_fcr_teaching.toml](configs/experiments/pjm5_fcr_teaching.toml).
-Its four provider parameter sets are scenario assumptions:
+## Experiment with the simulation
 
-| Provider | $K_i$ [MW/Hz] | $T_i$ [s] | $q_i^\star$ [MW] |
-|---|---:|---:|---:|
-| 1 | 10 | 0.4 | 1 |
-| 2 | 15 | 0.8 | 2 |
-| 3 | 20 | 1.5 | 3 |
-| 4 | 25 | 3.0 | 4 |
+You can create different simulations by editing [configs/fcr.toml](configs/fcr.toml);
+no Python changes are needed. The `[scenario]` table controls the event and
+simulation, `[market]` controls procurement, and each `[[providers]]` table
+describes one provider. Find the desired provider by its `provider_id` before
+editing its characteristics. The parameter values are illustrative assumptions.
 
-The script saves `time_series.csv`, `frequency_comparison.png`, and
-`provider_responses.png` in `results/pjm5_fcr_teaching/`. The CSV includes
-requested response, actual response, and total power for every provider.
-Use `--output-dir` to preserve separate experiment results; the default paths
-are reused on the next run. `--config` selects another TOML configuration.
+### Change a parameter and rerun
 
-## Verified default results
+First save a baseline so you can compare the results:
 
-| Quantity | Result |
-|---|---:|
-| Frequency without FCR at 40 s | 59.400035 Hz |
-| Lowest sampled frequency with FCR | 59.827191 Hz |
-| Frequency with FCR at 40 s | 59.882609 Hz |
-| Largest sampled numerical/analytical no-FCR difference | $1.50\times10^{-14}$ Hz |
-| Largest frequency difference after refining the solver | $4.89\times10^{-9}$ Hz |
+~~~powershell
+.\.venv\Scripts\python.exe scripts\run_fcr.py --output-dir results\baseline
+~~~
 
-All four sampled responses respect their reserve limits within numerical
-tolerance. Frequency settles below 60 Hz because this proportional primary
-response needs a remaining frequency error to sustain its added power.
-Restoring exactly 60 Hz would require a later secondary-control model.
+Then edit an existing value in the TOML, for example change
+`power_deficit_mw = 10.0` to `power_deficit_mw = 15.0` under `[scenario]`.
+Rerun into a different directory:
 
-## Reading the code
+~~~powershell
+.\.venv\Scripts\python.exe scripts\run_fcr.py --output-dir results\larger_event
+~~~
 
-| Read | File | Role |
+Compare the two `frequency_comparison.png` plots and `summary.json` files.
+For economic changes, also compare `market_outcomes.csv`: it records offers,
+awards, availability, payments and profit. Change one parameter at a time
+initially, and keep the same seed to make the comparison easier to interpret.
+Reusing an output directory replaces its generated files.
+
+### Choose what to vary
+
+In this table, `scenario.x` means the key `x` inside `[scenario]`, and
+"Provider" means a field in the relevant `[[providers]]` entry. Change existing
+keys rather than adding a second copy of the same TOML table or key.
+
+| Experiment | Where to edit | Example and interpretation |
 |---|---|---|
-| 1 | [providers/fcr.py](src/functional_incentives/providers/fcr.py) | One provider's parameters, request and rate of response |
-| 2 | [grid/aggregate_frequency.py](src/functional_incentives/grid/aggregate_frequency.py) | Frequency equation and analytical constant-step reference |
-| 3 | [grid/andes_adapter.py](src/functional_incentives/grid/andes_adapter.py) | Solved initial powers and case data |
-| 4 | [simulation/aggregate_fcr.py](src/functional_incentives/simulation/aggregate_fcr.py) | Numerical evolution of frequency and provider states together |
-| 5 | [run_pjm5_fcr_teaching.py](scripts/run_pjm5_fcr_teaching.py) | Experiment, comparisons, checks and saved outputs |
-| 6 | [plotting/fcr.py](src/functional_incentives/plotting/fcr.py) | Frequency and individual-response figures |
-| 7 | [tests](tests) | Analytical comparisons, signs, bounds and numerical convergence |
+| Larger disturbance | `scenario.power_deficit_mw` | Change 10 to 15 MW. A positive deficit lowers frequency; reserve procurement stays at its configured requirement. |
+| Later event or longer observation | `scenario.event_time_s`, `scenario.final_time_s` | Start at 5 s or observe until 60 s; final time must be after the event. |
+| More frequent output samples | `scenario.output_time_step_s` | Change 0.05 to 0.02 s for finer recorded trajectories. |
+| Different availability realization | `scenario.seed`, or CLI `--seed` | Use `--seed 123`. The draw changes; optimized offers are chosen before the draw. |
+| More or less reserve procurement | `market.requirement_mw` | Change 12 to 10 MW; use 0 for zero awards and no FCR delivery with normal clearing. |
+| Allow smaller positive bids | `market.minimum_bid_mw` | Change 1 to 0.1 MW. Small profitable offers may then replace voluntary opt-out; partial awards can already be below the minimum bid. |
+| Different bidding prices | Provider `minimum_bid_price_eur_per_mw_block`, `maximum_bid_price_eur_per_mw_block` | Change a provider's ceiling from 20 to 25. Positive optimized bids always use the ceiling because the reward has no acceptance model. |
+| More expensive reserve commitment | Provider `linear_cost_eur_per_mw_block`, `quadratic_cost_eur_per_mw2_block` | Increase either coefficient in `C(q) = a*q + 0.5*beta*q^2` and inspect the resulting offer. |
+| Different shortage penalties | Provider `penalty_eur_per_missing_mw_block` | Change 200 to 100 EUR per missing MW per block. The existing `no_penalty` comparison sets this to zero for all providers. |
+| Different reserve uncertainty | Provider `mean_mw`, `variance_mw2` | For `renewable_uncertain`, change variance from 4 to 0.04 MW². Variance is the square of standard deviation; these moments describe the underlying Gaussian before bounding. |
+| Deterministic availability | Provider `variance_mw2`, `mean_mw` | Set variance to 0 and mean to 2 MW for exactly 2 MW available in every block. |
+| Different availability boundaries | `availability.boundary_mode` | Use `"truncated"` or `"clipped"`; clipping creates probability masses at zero and the physical cap. |
+| Withhold reserve from bidding | Provider `reserve_safety_margin_fraction` | Change 0 to 0.1: a physical cap of 4 MW gives a bid ceiling of 3.6 MW. Physical availability retains its original cap. |
+| Change physical capability or dispatch | Provider `reserve_capacity_mw`, `minimum_power_mw`, `maximum_power_mw`, `power_setpoint_mw` | Change these together consistently: symmetric reserve must fit both margins around solved dispatch. The slack setpoint is only an initialization guess. |
+| Faster or slower provider response | Provider `time_constant_s` | Change a renewable's 0.25 to 0.1 s for a faster response to its droop request, then inspect frequency and provider-response plots. |
+| Stronger or weaker droop response | `scenario.droop_pu` | Change 0.05 to 0.04 for stronger unsaturated response. Reserve limits still apply. |
+| Less synchronous inertia | Conventional provider `inertia_s` | Change `conventional_1` from 5 to 2.5 s and inspect the initial frequency fall. Renewable inertia stays zero in this model. |
+| Different machine or converter size | Provider `rating_mva` | The rating sets the droop power base and, for conventional machines, contributes to inertia. Active-power limits remain separate inputs. |
+| Different load sensitivity | `scenario.load_frequency_sensitivity` | Change 1 to 0.5 to reduce frequency-dependent load damping. |
 
-## Next development stage
+Prices, cost coefficients and penalties apply to the **whole delivery block**.
+Changing `market.block_duration_hours` does not automatically rescale them or
+change the simulated event horizon. The additional bidding safety margin
+defaults to zero; physical headroom is already enforced. If its bid ceiling
+falls below the minimum bid, that provider offers zero. If total offered supply
+falls below the market requirement, the run stops with an insufficient-reserve
+error. Adjust the scenario's demand or provider assumptions to study a feasible
+case; the simulator does not procure a partial requirement automatically.
 
-The next requested stage is to implement the provider decision process that
-creates offers, then clear the simplified Week 3 FCR capacity market:
+### Save experiments as named scenarios
 
-$$
-\min_{\{q_i\}}\sum_i c_iq_i
-\quad\text{subject to}\quad
-\sum_i q_i\ge Q_{\mathrm{req}},\qquad 0\le q_i\le\bar q_i.
-$$
+To keep several experiments in one file, append `[[comparisons]]` entries to
+the **end** of `configs/fcr.toml`. For example:
 
-A provider decides what capacity $\bar q_i$ to offer and at what bid price
-$c_i$, using explicitly modelled assumptions about costs, expectations and
-behaviour. The auction then chooses awards $q_i^\star$; an explicit pricing
-rule determines $\lambda^\star$. Awards become the reserve limits used by the
-existing dynamic model. After this market/provider-decision layer is in place,
-the following requested stage is to implement the functional incentive.
+~~~toml
+[[comparisons]]
+name = "larger_event"
+label = "15 MW deficit"
+scenario = { power_deficit_mw = 15.0 }
 
-The slides specify $c_i$ as a bid, but do not derive it. Supervisors also
-advised that $K_i$ should be consistent across generators and related to machine
-size $S_i$, mentioning a normalized proportion associated with 5% droop
-($1/0.05$). The precise calibration (including the rating/frequency base and
-whether reserve saturation scales with size) is unresolved; current $K_i$ and
-$q_i^\star$ remain scenario assumptions. The [market and provider-decision
-plan](docs/FCR_MARKET_PLAN.md) records the interpretation and implementation
-order, while [FCR_MODEL.md](docs/FCR_MODEL.md) explains the dimensional issue.
+[[comparisons]]
+name = "faster_renewables"
+label = "Faster renewable response"
+providers = { renewable_reliable = { time_constant_s = 0.1 }, renewable_uncertain = { time_constant_s = 0.1 } }
 
-## Research context and sources
+[[comparisons]]
+name = "reserve_margin"
+label = "10 percent bidding margin"
+all_providers = { reserve_safety_margin_fraction = 0.1 }
+~~~
 
-The main local sources are `references/week3_eth.pdf` (29 September 2026) and
-`references/PSDCO_Script_2026 (1).pdf`. PDF page references are listed in the
-guides. These research files and `local_context/` are intentionally excluded
-from Git. `local_context/NOW.md`, `DECISIONS.md`, and `PROJECT_HANDOFF.md`, when
-present, provide current status, accepted decisions, and historical context.
-ANDES IEEE 14-bus remains the planned later validation case for more detailed
-network dynamics.
+Each scenario starts from the base values in the file, independently of the
+other comparisons. A `market = { requirement_mw = 10.0 }` entry overrides market
+settings; `scenario`, `decision` and `availability` work the same way.
+`all_providers` changes every provider, while `providers` changes the named IDs
+and takes precedence over common changes. For a common penalty policy, use
+`all_providers = { penalty_eur_per_missing_mw_block = 100.0 }` inside a comparison.
+Use unique names made of lowercase letters, digits, underscores or hyphens;
+`base` is reserved. Labels must also be unique.
+
+~~~powershell
+# Run one of the appended scenarios
+.\.venv\Scripts\python.exe scripts\run_fcr.py --scenario faster_renewables --output-dir results\faster_renewables
+
+# Run base plus every comparison, with combined tables and a comparison plot
+.\.venv\Scripts\python.exe scripts\run_fcr.py --compare --output-dir results\experiments
+
+# Repeat the comparison with a different seed for all cases
+.\.venv\Scripts\python.exe scripts\run_fcr.py --compare --seed 123 --output-dir results\experiments_seed123
+
+# Replay the exact saved inputs of a previous run
+.\.venv\Scripts\python.exe scripts\run_fcr.py --config results\experiments\base\effective_config.json --output-dir results\replay
+~~~
+
+For comparisons, open `scenario_comparison.png` to see frequency and offers,
+`comparison_summary.csv` for prices and frequency metrics, and
+`comparison_providers.csv` for provider-level outcomes. Keeping the same seed
+and availability laws preserves the draws across cases; changing a law can
+change its provider's draw. Try several seeds before interpreting a result as
+a general effect.
+
+For prescribed offers, use `decision.mode = "fixed"` with per-provider
+`fixed_bid_eur_per_mw_block` and `fixed_offer_mw`. For prescribed awards, use
+`market.mode = "fixed"` with `fixed_price_eur_per_mw_block` and per-provider
+`fixed_award_mw`. Worked examples and the corresponding constraints are in
+[the configuration guide](docs/CONFIGURATION.md).
+
+## Workflow
+
+1. Solve the operating point and check each provider's physical headroom.
+2. Choose $(c_i,\bar q_i)$ continuously using commitment cost and expected
+   Gaussian reserve-shortage penalties, the minimum bid and safety margin.
+3. Clear the FCR market for awards $q_i^\star$ and a uniform price.
+4. Draw availability once per provider.
+5. Simulate frequency and provider response with
+   $q_i^{\mathrm{eff}}=\min(q_i^\star,A_i)$.
+6. Save decisions, payments, penalties, profit, trajectories and numerical checks.
+
+The equations, units, assumptions and current results are in
+[docs/MODEL.md](docs/MODEL.md). Configuration examples, including fixed offers,
+fixed awards, deterministic availability and earlier parameter sets, are in
+[docs/CONFIGURATION.md](docs/CONFIGURATION.md). All use the same implementation.
+
+## Current result
+
+With the default seed 20261008:
+
+| Provider | Offer [MW] | Award [MW] |
+|---|---:|---:|
+| Conventional 1 | 3.945482 | 3.945482 |
+| Conventional 2 | 3.947217 | 3.947217 |
+| Conventional 3 | 3.950723 | 2.407773 |
+| Reliable renewable | 1.699528 | 1.699528 |
+| Uncertain renewable | 0 | 0 |
+
+The market procures 12 MW at **24 EUR/MW for the whole four-hour block**.
+The sampled frequency nadir is **59.919129 Hz** and the final frequency is
+**59.974692 Hz**.
+
+The uncertain renewable opts out because its expected penalty makes every
+feasible positive offer unprofitable. This example uses a **1 MW minimum
+positive offer**. Smaller bids could remain profitable. The offer objective
+also selects the highest allowed price for positive quantity; it does not
+predict auction acceptance or clearing prices.
+
+Provider price intervals, costs, uncertainty, inertia, response times, reserve
+caps and `reserve_safety_margin_fraction` are configurable in the TOML. The
+safety margin defaults to zero and limits bids after physical headroom checks;
+it does not change the availability law. `market.minimum_bid_mw` sets the market
+minimum. Each comparison can override configuration sections, all providers,
+or individual provider IDs. The `no_penalty` case now removes every provider's
+penalty. See the configuration guide for examples and fixed modes.
+
+## Outputs
+
+Single runs write to `results/fcr/` by default. With `--compare`, each scenario
+gets a subdirectory and the parent contains combined tables and a comparison
+figure. Reusing a destination replaces its generated files.
+
+| File | Contents |
+|---|---|
+| `effective_config.json` | Actual parameters and seed; can be passed back to `--config` |
+| `operating_point.json` | Solved dispatch, ratings and inertia |
+| `market_outcomes.csv` | Offers, awards, draws, effective reserve and block accounting |
+| `offer_rewards.csv` | Diagnostic reward at zero, feasible endpoints and the selected offer; not a search grid |
+| `time_series.csv` | Frequency, requested/delivered responses and total generator powers |
+| `summary.json` | Price, payments and numerical checks |
+| `frequency_comparison.png`, `provider_responses.png` | Physical trajectories |
+| `comparison_summary.csv`, `comparison_providers.csv`, `scenario_comparison.png` | Additional outputs for `--compare` |
+
+Generated results are ignored by Git.
+
+## Code map
+
+The package has one module per responsibility; there are no stage-specific
+implementations or empty incentive packages.
+
+| Module in `src/functional_incentives/` | Responsibility |
+|---|---|
+| `grid.py` | ANDES operating point, configurable fleet and inertia |
+| `availability.py` | Gaussian sampling and expected shortage |
+| `providers.py` | Capability, cost parameters and droop response |
+| `decision.py` | Offer evaluation, exact price optimum and bounded continuous quantity optimization |
+| `market.py` | Clearing, explicit fixed allocation and settlement |
+| `frequency.py` | Frequency equation and analytical no-FCR reference |
+| `simulation.py` | Block sequencing and coupled numerical dynamics |
+| `metrics.py` | Bounds, analytical agreement and solver refinement |
+| `plotting.py` | Trajectory and parameter-comparison figures |
+| `experiment.py` | Configuration, orchestration, output and command line |
+
+There are five focused test files covering decisions, market, dynamics,
+operating points and the complete experiment. **All 46 tests pass.** All three
+configured scenarios were rerun with regenerated plots. The model guide records
+old/new offers, awards, prices and frequency responses. Generated baseline
+records are in `results/discrete_baseline/`, with a detailed provider comparison
+in `results/fcr/bidding_update_comparison.csv`.
+
+Functional incentives remain future work. Local research PDFs in `references/`
+and notes in `local_context/` are intentionally outside Git. Consult
+`local_context/NOW.md` and `DECISIONS.md` when present.

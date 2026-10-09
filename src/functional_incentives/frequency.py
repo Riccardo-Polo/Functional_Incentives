@@ -1,25 +1,4 @@
-"""First-order aggregate linear frequency dynamics.
-
-Model sources
--------------
-* ``references/PSDCO_Script_2026 (1).pdf``, Chapter 8, especially equations
-  8.8--8.10 (inertia aggregation) and 8.24 (frequency dynamics).
-* ``references/week3_eth.pdf``, slides 7 and 12--17.
-
-State and sign convention
--------------------------
-The only state is ``delta_frequency_hz = f - f_nominal``.  A positive
-``power_deficit_mw`` means either an increase in load or a loss of generation,
-so it makes frequency fall.  A positive ``power_response_mw`` counteracts that
-deficit.  With MW, Hz and seconds, the model is
-
-    M_f d(delta_f)/dt = -D delta_f - deficit + response,
-
-where ``M_f = 2 H_eq S_sync / f_nominal`` in MW s/Hz and ``D`` is in MW/Hz.
-In ``simulate_power_step``, the response and deficit remain constant after
-activation. The instantaneous derivative also supports changing inputs and is
-reused by the numerical FCR simulator.
-"""
+"""Aggregate frequency equation and its analytical no-FCR regression reference."""
 
 from __future__ import annotations
 
@@ -27,8 +6,6 @@ from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import NDArray
-
-from functional_incentives.time_grid import make_output_times
 
 
 @dataclass(frozen=True)
@@ -81,6 +58,27 @@ class FrequencyTrajectory:
     power_response_mw: NDArray[np.float64]
 
 
+def make_output_times(
+    final_time_s: float, time_step_s: float
+) -> NDArray[np.float64]:
+    """Sample from zero to the exact endpoint, with a shorter last interval if needed.
+
+    Both simulators use this grid so samples can be compared at identical
+    timestamps. Approximate equality must not replace the requested endpoint:
+    even a short final interval can contain the disturbance.
+    """
+
+    if not np.isfinite(final_time_s) or final_time_s <= 0.0:
+        raise ValueError("final_time_s must be finite and positive")
+    if not np.isfinite(time_step_s) or time_step_s <= 0.0:
+        raise ValueError("time_step_s must be finite and positive")
+
+    time_s = np.arange(0.0, final_time_s, time_step_s, dtype=float)
+    # Floating-point arange may include an endpoint equal to or beyond stop.
+    # Keep only earlier samples, then append the exact endpoint once.
+    return np.append(time_s[time_s < final_time_s], final_time_s)
+
+
 def frequency_derivative_hz_per_s(
     delta_frequency_hz: float,
     *,
@@ -98,28 +96,23 @@ def frequency_derivative_hz_per_s(
     return numerator_mw / parameters.frequency_mass_mw_s_per_hz
 
 
-def simulate_power_step(
+def analytical_no_fcr(
     parameters: LinearFrequencyParameters,
     *,
     power_deficit_mw: float,
     start_time_s: float,
     final_time_s: float,
     time_step_s: float,
-    power_response_mw: float = 0.0,
 ) -> FrequencyTrajectory:
-    """Return the exact trajectory for constant power steps.
+    """Analytical no-FCR trajectory used to check the numerical solver.
 
-    The deficit and response both start at ``start_time_s``.  The closed-form
-    solution keeps this first learning model transparent and avoids numerical
-    integration error. The FCR simulator reuses
-    :func:`frequency_derivative_hz_per_s` for its time-varying responses.
+    The deficit starts at ``start_time_s``; provider response is zero.
     Output includes the exact final time, with a shorter last interval when
     the horizon is not a multiple of ``time_step_s``.
     """
 
     for name, value in (
         ("power_deficit_mw", power_deficit_mw),
-        ("power_response_mw", power_response_mw),
         ("start_time_s", start_time_s),
         ("final_time_s", final_time_s),
         ("time_step_s", time_step_s),
@@ -128,8 +121,6 @@ def simulate_power_step(
             raise ValueError(f"{name} must be finite")
     if power_deficit_mw < 0.0:
         raise ValueError("power_deficit_mw cannot be negative")
-    if power_response_mw < 0.0:
-        raise ValueError("power_response_mw cannot be negative")
     if start_time_s < 0.0:
         raise ValueError("start_time_s cannot be negative")
     if final_time_s <= start_time_s:
@@ -141,7 +132,7 @@ def simulate_power_step(
     elapsed_s = np.maximum(time_s - start_time_s, 0.0) # time elapsed since the disturbance started
     step_is_active = time_s >= start_time_s
 
-    net_deficit_mw = power_deficit_mw - power_response_mw
+    net_deficit_mw = power_deficit_mw
     damping = parameters.load_damping_mw_per_hz
     frequency_mass = parameters.frequency_mass_mw_s_per_hz
 
@@ -154,7 +145,7 @@ def simulate_power_step(
         delta_frequency_hz = -net_deficit_mw * elapsed_s / frequency_mass
 
     power_deficit = np.where(step_is_active, power_deficit_mw, 0.0)
-    power_response = np.where(step_is_active, power_response_mw, 0.0)
+    power_response = np.zeros_like(time_s)
 
     return FrequencyTrajectory(
         time_s=time_s,
