@@ -18,9 +18,9 @@ from .frequency import LinearFrequencyParameters, damping_from_load_sensitivity,
 from .grid import AndesOperatingPoint, FleetGenerator, solve_operating_point
 from .market import FCRCapacityOffer
 from .metrics import summarize_fcr_trajectories
-from .plotting import plot_frequency_comparison, plot_provider_responses, plot_scenario_comparison
+from .plotting import plot_frequency_comparison, plot_provider_responses, plot_scenario_comparison, plot_fi_financials
 from .providers import BlockProvider, QuadraticCommitmentCost
-from .simulation import prepare_fcr_block, simulate_fcr_power_step
+from .simulation import AggregateFCRTrajectory, prepare_fcr_block, simulate_fcr_power_step
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -98,8 +98,45 @@ def load_block_providers(
             reserve_safety_margin_fraction=float(raw.get("reserve_safety_margin_fraction", 0.0)),
             technology=raw.get("technology", "unspecified"),
             gain_mw_per_hz=(float(raw["gain_mw_per_hz"]) if "gain_mw_per_hz" in raw else None),
+            participation=raw.get("participation", "fcr"),
+            fi_gamma_eur_per_hz_mw_s=(float(raw["fi_gamma_eur_per_hz_mw_s"])
+                                    if "fi_gamma_eur_per_hz_mw_s" in raw else None),
+            fi_rho_eur_per_mw2_s=(float(raw["fi_rho_eur_per_mw2_s"])
+                                if "fi_rho_eur_per_mw2_s" in raw else None),
         ))
     return tuple(providers)
+
+
+def save_fi_accounting(trajectory: AggregateFCRTrajectory, output_dir: Path) -> dict:
+    """Save FI-only ledgers; event transfers are separate from FCR block payments."""
+    fi = trajectory.fi
+    names = ("target_benchmark_eur", "predicted_settlement_eur", "gross_rewards_eur",
+             "gross_penalties_eur", "net_settlement_eur", "activation_cost_eur", "profit_eur")
+    totals = {name: 0.0 for name in names}
+    rows, intervals = [], []
+    series = {"time_s": trajectory.time_s}
+    for name in ("payment_rate_eur_per_s", *names):
+        values = np.zeros((len(trajectory.time_s), 0)) if fi is None else getattr(fi, name)
+        series[f"total_{name}"] = np.sum(values, axis=1)
+        if name in totals:
+            totals[name] = float(np.sum(values[-1]))
+        if fi is not None:
+            for j, identity in enumerate(fi.provider_ids):
+                series[f"{identity}_{name}"] = values[:, j]
+    if fi is not None:
+        intervals = fi.intervals
+        for j, identity in enumerate(fi.provider_ids):
+            series[f"{identity}_sampled_frequency_error_hz"] = fi.sampled_frequency_error_hz[:, j]
+            rows.append({"provider_id": identity, **{name: float(getattr(fi, name)[-1, j]) for name in names}})
+    pd.DataFrame(rows, columns=("provider_id", *names)).to_csv(output_dir / "fi_outcomes.csv", index=False)
+    pd.DataFrame(intervals, columns=(None if intervals else (
+        "provider_id", "start_time_s", "end_time_s", "sampled_frequency_error_hz",
+        "initial_response_mw", "target_mw", "final_response_mw", "target_benchmark_eur",
+        "predicted_settlement_eur", "predicted_activation_cost_eur", "predicted_profit_eur",
+        "gross_rewards_eur", "gross_penalties_eur", "net_settlement_eur", "activation_cost_eur", "profit_eur"))).to_csv(
+            output_dir / "fi_decisions.csv", index=False)
+    pd.DataFrame(series).to_csv(output_dir / "fi_time_series.csv", index=False)
+    return {"provider_count": 0 if fi is None else len(fi.provider_ids), **totals}
 
 
 def run_experiment(config: dict, output_dir: Path, seed_override: int | None = None) -> dict:
@@ -158,9 +195,14 @@ def run_experiment(config: dict, output_dir: Path, seed_override: int | None = N
         final_time_s=float(scenario["final_time_s"]),
     )
     dt = float(scenario["output_time_step_s"])
+    solver_step = float(scenario.get("maximum_solver_step_s", dt))
+    fi_interval = config.get("fi", {}).get("decision_interval_s")
+    if fi_interval is not None:
+        fi_interval = float(fi_interval)
     controlled = simulate_fcr_power_step(
         parameters, block.response_parameters, **event, output_time_step_s=dt,
         provider_operating_power_mw=block.operating_powers_mw,
+        maximum_solver_step_s=solver_step, fi_decision_interval_s=fi_interval,
     )
     numerical_no_fcr = simulate_fcr_power_step(
         parameters, (), **event, output_time_step_s=dt)
@@ -168,15 +210,17 @@ def run_experiment(config: dict, output_dir: Path, seed_override: int | None = N
     # Reuse the SAME draw, award and gain for solver refinement.
     refined = simulate_fcr_power_step(
         parameters, block.response_parameters, **event, output_time_step_s=dt,
-        maximum_solver_step_s=dt/2, relative_tolerance=1e-10, absolute_tolerance=1e-12,
+        maximum_solver_step_s=solver_step/2, relative_tolerance=1e-10, absolute_tolerance=1e-12,
+        fi_decision_interval_s=fi_interval,
     )
     metrics = summarize_fcr_trajectories(
         controlled, numerical_no_fcr, reference, refined)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     rows = []
-    for p, decision, settlement, response in zip(
+    for p, decision, settlement, response, mode in zip(
         block.providers, block.decisions, block.settlements, block.response_parameters,
+        block.participation_modes,
         strict=True,
     ):
         rows.append({
@@ -185,7 +229,12 @@ def run_experiment(config: dict, output_dir: Path, seed_override: int | None = N
             "technology": p.technology,
             "operating_power_mw": p.operating_power_mw,
             "power_base_mw": p.power_base_mw,
-            "gain_mw_per_hz": response.gain_mw_per_hz,
+            "gain_mw_per_hz": getattr(response, "gain_mw_per_hz", 0.0),
+            "configured_participation": p.participation,
+            "participation": mode,
+            "response_limit_mw": response.reserve_mw,
+            "fi_gamma_eur_per_hz_mw_s": p.fi_gamma_eur_per_hz_mw_s,
+            "fi_rho_eur_per_mw2_s": p.fi_rho_eur_per_mw2_s,
             "offered_mw": decision.offer.quantity_mw,
             "bid_eur_per_mw_block": decision.offer.price_eur_per_mw_block,
             "clearing_price_eur_per_mw_block": block.market.clearing_price_eur_per_mw_block,
@@ -206,7 +255,7 @@ def run_experiment(config: dict, output_dir: Path, seed_override: int | None = N
         # Diagnostic values only: these points do not drive optimization.
         quantities = {0.0, decision.offer.quantity_mw}
         minimum_bid = float(config["market"].get("minimum_bid_mw", 1.0))
-        if p.maximum_offer_mw >= minimum_bid:
+        if p.participation in ("fcr", "fcr_or_fi") and p.maximum_offer_mw >= minimum_bid:
             quantities.update((minimum_bid, p.maximum_offer_mw))
         price = (p.maximum_bid_price_eur_per_mw_block if decision_mode == "optimize"
                  else decision.offer.price_eur_per_mw_block)
@@ -229,15 +278,19 @@ def run_experiment(config: dict, output_dir: Path, seed_override: int | None = N
         "time_s": controlled.time_s,
         "power_deficit_mw": controlled.power_deficit_mw,
         "frequency_fcr_hz": controlled.frequency_hz,
+        "frequency_hz": controlled.frequency_hz,
         "frequency_no_fcr_numerical_hz": numerical_no_fcr.frequency_hz,
         "frequency_no_fcr_analytical_hz": reference.frequency_hz,
-        "total_fcr_response_mw": controlled.total_response_mw,
+        "total_response_mw": controlled.total_response_mw,
+        "total_fcr_response_mw": controlled.total_fcr_response_mw,
+        "total_fi_response_mw": controlled.total_fi_response_mw,
     }
     for j, provider_id in enumerate(controlled.provider_ids):
         series[f"{provider_id}_requested_mw"] = controlled.provider_requested_response_mw[:, j]
         series[f"{provider_id}_response_mw"] = controlled.provider_response_mw[:, j]
         series[f"{provider_id}_active_power_mw"] = controlled.provider_active_power_mw[:, j]
     pd.DataFrame(series).to_csv(output_dir / "time_series.csv", index=False)
+    fi_totals = save_fi_accounting(controlled, output_dir)
     summary = {
         "seed": seed, "boundary_mode": config["availability"]["boundary_mode"],
         "block_duration_hours": block_hours,
@@ -252,6 +305,8 @@ def run_experiment(config: dict, output_dir: Path, seed_override: int | None = N
         "droop_pu": float(scenario["droop_pu"]),
         "clearing_price_eur_per_mw_block": block.market.clearing_price_eur_per_mw_block,
         "capacity_payments_eur": block.market.total_payment_eur,
+        "fi": {"decision_interval_s": fi_interval, "settlement": "sampled frequency; delivered power",
+               "gamma_policy": "fixed user input", "accounting_horizon_s": event["final_time_s"], **fi_totals},
         "metrics": metrics,
     }
     (output_dir / "summary.json").write_text(
@@ -265,16 +320,19 @@ def run_experiment(config: dict, output_dir: Path, seed_override: int | None = N
     plot_frequency_comparison(controlled, numerical_no_fcr, reference,
                               output_dir / "frequency_comparison.png")
     plot_provider_responses(controlled, output_dir / "provider_responses.png",
-                            reserve_symbol=r"q^{\mathrm{eff}}")
-    print("PJM 5-bus FCR market with Gaussian reserve availability")
+                            reserve_symbol=r"q^{\mathrm{eff}}", participation_modes=block.participation_modes)
+    plot_fi_financials(controlled, output_dir / "fi_financials.png")
+    print("PJM 5-bus FCR/FI experiment with Gaussian reserve availability")
     print(f"  Boundary rule: {summary['boundary_mode']}; seed: {seed}")
     print(f"  Clearing price: {block.market.clearing_price_eur_per_mw_block:g} EUR/MW/block")
     print(f"  Decisions: {decision_mode}; allocation: {market_mode}")
     for row in rows:
-        print(f"  {row['provider_id']}: bid={row['bid_eur_per_mw_block']:g}, "
+        print(f"  {row['provider_id']} ({row['participation']}): bid={row['bid_eur_per_mw_block']:g}, "
               f"offer={row['offered_mw']:g} MW, award={row['awarded_mw']:g} MW, "
               f"available={row['available_mw']:.4f} MW, "
-              f"K={row['gain_mw_per_hz']:.4f} MW/Hz, profit={row['profit_eur']:.2f} EUR")
+              f"K={row['gain_mw_per_hz']:.4f} MW/Hz, FCR block profit={row['profit_eur']:.2f} EUR")
+    print(f"  FI event settlement: {fi_totals['net_settlement_eur']:.4f} EUR; "
+          f"FI event profit: {fi_totals['profit_eur']:.4f} EUR")
     print(f"  Sampled nadir: {metrics['nadir_sampled_hz']:.6f} Hz")
     print(f"  Final frequency: {metrics['final_frequency_hz']:.6f} Hz")
     print(f"  Refined solver frequency difference: {metrics['refined_frequency_max_error_hz']:.3e} Hz")
@@ -292,13 +350,15 @@ def configured_scenarios(config: dict) -> list[tuple[str, str, dict]]:
     variants = [("base", "Base", deepcopy(config))]
     names = {"base"}
     optional_fields = {
-        "scenario": {"operating_point"},
+        "scenario": {"operating_point", "maximum_solver_step_s"},
         "decision": {"mode", "quantity_tolerance_mw"},
         "market": {"mode", "minimum_bid_mw", "fixed_price_eur_per_mw_block"},
         "availability": set(),
+        "fi": {"decision_interval_s"},
         "providers": {"reserve_safety_margin_fraction", "gain_mw_per_hz", "is_slack",
                       "minimum_bid_price_eur_per_mw_block", "maximum_bid_price_eur_per_mw_block",
-                      "fixed_offer_mw", "fixed_bid_eur_per_mw_block", "fixed_award_mw"},
+                      "fixed_offer_mw", "fixed_bid_eur_per_mw_block", "fixed_award_mw",
+                      "participation", "fi_gamma_eur_per_hz_mw_s", "fi_rho_eur_per_mw2_s"},
     }
 
     def update(target: dict, overrides: dict, section: str) -> None:
@@ -311,7 +371,7 @@ def configured_scenarios(config: dict) -> list[tuple[str, str, dict]]:
 
     for variant in config.get("comparisons", []):
         unknown = set(variant) - {"name", "label", "scenario", "decision", "market",
-                                  "availability", "all_providers", "providers"}
+                                  "availability", "fi", "all_providers", "providers"}
         if unknown:
             raise ValueError(f"unknown comparison fields: {sorted(unknown)}")
         name = variant["name"]
@@ -319,7 +379,7 @@ def configured_scenarios(config: dict) -> list[tuple[str, str, dict]]:
             raise ValueError("comparison names must be unique, simple lowercase directory names")
         names.add(name)
         changed = deepcopy(config)
-        for section in ("scenario", "decision", "market", "availability"):
+        for section in ("scenario", "decision", "market", "availability", "fi"):
             update(changed.setdefault(section, {}), variant.get(section, {}), section)
         by_id = {p["provider_id"]: p for p in changed["providers"]}
         if len(by_id) != len(changed["providers"]):
@@ -343,7 +403,10 @@ def run_comparisons(config: dict, output_dir: Path, seed: int | None = None) -> 
     for name, label, changed in variants:
         result = run_experiment(changed, output_dir / name, seed)
         summaries.append({"case": label, "clearing_price_eur_per_mw_block":
-                          result["clearing_price_eur_per_mw_block"], **result["metrics"]})
+                          result["clearing_price_eur_per_mw_block"], **result["metrics"],
+                          **{f"fi_{key}": result["fi"][key] for key in (
+                              "provider_count", "gross_rewards_eur", "gross_penalties_eur",
+                              "net_settlement_eur", "activation_cost_eur", "profit_eur")}})
         table = pd.read_csv(output_dir / name / "market_outcomes.csv")
         offers.append(table.assign(case=label))
         trajectories[label] = pd.read_csv(output_dir / name / "time_series.csv")

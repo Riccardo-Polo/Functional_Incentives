@@ -30,6 +30,11 @@ block_duration_hours = 4.0
 [availability]
 boundary_mode = "truncated"
 
+[fi]
+decision_interval_s = 0.1  # independent of solver/output step; shortened last interval
+# Per-provider participation defaults to "fcr". FI scenarios below override it.
+# gamma [EUR/(Hz MW s)] is fixed user input; rho [EUR/(MW^2 s)] must be positive.
+
 [[providers]]
 provider_id = "conventional_1"
 generator_id = "conventional_1"
@@ -139,11 +144,23 @@ maximum_bid_price_eur_per_mw_block = 20.0
 
 # --compare uses these overrides through the same implementation.
 [[comparisons]]
-name = "no_penalty"
-label = "No penalty (all providers)"
-all_providers = { penalty_eur_per_missing_mw_block = 0.0 }
-
-[[comparisons]]
 name = "lower_uncertainty"
 label = "Uncertain renewable: lower uncertainty"
 providers = { renewable_uncertain = { variance_mw2 = 0.04 } }
+
+# FI does not contribute to the 12 MW contracted FCR requirement.
+# These pedagogical coefficients are not calibrated to observed payments.
+[[comparisons]]
+name = "fi_exogenous"
+label = "FI: assigned, gamma=50"
+providers = { renewable_uncertain = { participation = "fi", fi_gamma_eur_per_hz_mw_s = 50.0, fi_rho_eur_per_mw2_s = 1.0 } }
+
+[[comparisons]]
+name = "fi_endogenous"
+label = "FI: voluntary opt-out, gamma=50"
+providers = { renewable_uncertain = { participation = "fcr_or_fi", fi_gamma_eur_per_hz_mw_s = 50.0, fi_rho_eur_per_mw2_s = 1.0 } }
+
+[[comparisons]]
+name = "fi_strong"
+label = "FI: voluntary opt-out, gamma=200"
+providers = { renewable_uncertain = { participation = "fcr_or_fi", fi_gamma_eur_per_hz_mw_s = 200.0, fi_rho_eur_per_mw2_s = 1.0 } }

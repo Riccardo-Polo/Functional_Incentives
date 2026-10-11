@@ -22,8 +22,116 @@ There are no separate teaching, linear-frequency or market-stage runners.
 | Add/remove a generator | Add/remove its `[[providers]]` entry; keep exactly one conventional slack |
 | Repeat a saved experiment | `--config results/.../effective_config.json` |
 
-Prices and costs apply to the entire delivery block. Specifying a different
-block duration does not rescale coefficients automatically.
+FCR prices and costs apply to the entire delivery block. Specifying a different
+block duration does not rescale coefficients automatically. FI coefficients
+below define rates integrated over the simulated event in seconds.
+
+## Functional incentives: participation, gamma and timing
+
+The default base scenario remains FCR-only for comparison. Run the included FI
+scenarios through the same runner:
+
+~~~powershell
+.\.venv\Scripts\python.exe scripts\run_fcr.py --scenario fi_exogenous --output-dir results\fi_exogenous
+.\.venv\Scripts\python.exe scripts\run_fcr.py --scenario fi_endogenous --output-dir results\fi_endogenous
+.\.venv\Scripts\python.exe scripts\run_fcr.py --scenario fi_strong --output-dir results\fi_strong
+.\.venv\Scripts\python.exe scripts\run_fcr.py --compare --output-dir results\fcr_fi
+~~~
+
+`fi_exogenous` assigns the uncertain renewable to FI. `fi_endogenous` lets it
+try the existing FCR offer optimizer and enter FI only on a zero offer.
+Both use gamma 50 and rho 1. `fi_strong` uses the same endogenous rule with
+gamma 200. These are illustrative coefficients, not calibrated market prices.
+The base 1 MW minimum makes the uncertain renewable opt out in both endogenous
+cases; lowering the minimum or changing penalties can change that outcome.
+
+To enable FI directly in a provider's existing `[[providers]]` table, add:
+
+~~~toml
+participation = "fi"  # or "fcr_or_fi" for the sequential FCR opt-out rule
+fi_gamma_eur_per_hz_mw_s = 50.0
+fi_rho_eur_per_mw2_s = 1.0
+~~~
+
+Keep the existing physical and FCR economic fields. The latter are unused for
+an assigned FI provider's bid but are needed when trying `fcr_or_fi`.
+Gamma must be finite and nonnegative; rho must be finite and strictly positive.
+Both are explicit for `fi` and `fcr_or_fi`; neither is inferred from FCR costs.
+Gamma remains fixed during the event. Gamma zero gives no payment and, from
+the default zero initial response, no FI action.
+
+| Setting | Meaning |
+|---|---|
+| Provider `participation = "fcr"` | Default. Existing FCR behavior; zero awards do not enable FI. |
+| Provider `participation = "fi"` | Exogenous FI assignment; zero FCR offer and award. |
+| Provider `participation = "fcr_or_fi"` | FI only if the optimized FCR offer is zero; positive rejected offers stay FCR. |
+| Provider `participation = "inactive"` | No controlled response; dispatch and online inertia remain. |
+| Provider `fi_gamma_eur_per_hz_mw_s` | Fixed coefficient in `s = -gamma * sampled_error * delivered_MW`. |
+| Provider `fi_rho_eur_per_mw2_s` | Positive coefficient in activation-cost rate `rho * delivered_MW² / 2`. |
+| `fi.decision_interval_s` | Positive shared FI measurement/decision interval, required when FI is active. Default config: 0.1 s. |
+| `scenario.maximum_solver_step_s` | Optional positive RK45 maximum step; defaults to the output step for backward compatibility. |
+| `scenario.output_time_step_s` | Saved/plot sample spacing. Set the solver maximum explicitly to vary this independently. |
+
+The clock starts at zero. All FI providers decide simultaneously; a final short
+interval is optimized using its actual length. A disturbance between decisions
+does not trigger a new measurement. The sample is held for settlement throughout
+the interval, while actual power evolves continuously with `time_constant_s`.
+FI capability is the sampled `A_i`, bounded by the physical symmetric reserve
+cap. There is no FCR minimum bid or bidding safety margin on FI targets.
+
+Assigned FI/inactive providers must have zero prescribed offers and awards in
+fixed modes. `fcr_or_fi` is incompatible with `decision.mode = "fixed"`, since
+a prescribed zero is not a voluntary optimizer result. With optimized offers,
+fixed allocation is allowed subject to the same offer bounds and exclusion.
+FI never fills the FCR procurement requirement; infeasible clearing still stops
+the run before availability is sampled.
+
+### Save a gamma experiment
+
+Edit gamma in an existing FI comparison to change that named scenario, or
+append the following comparison at the end of the TOML:
+
+~~~toml
+[[comparisons]]
+name = "fi_gamma100_slow_sampling"
+label = "FI gamma=100, decision every 0.5 s"
+fi = { decision_interval_s = 0.5 }
+scenario = { maximum_solver_step_s = 0.02 }
+providers = { renewable_uncertain = { participation = "fcr_or_fi", fi_gamma_eur_per_hz_mw_s = 100.0, fi_rho_eur_per_mw2_s = 1.0 } }
+~~~
+
+Run it with `--scenario fi_gamma100_slow_sampling`. Each comparison starts from
+base, so a new FI comparison must include its participation and coefficients;
+it does not inherit them from `fi_endogenous`. Individual provider overrides
+win over `all_providers`; the `[fi]` table supports ordinary comparison overrides.
+To observe multiple FI providers, assign them explicitly and keep enough FCR
+offers to meet the requirement. No role assignment changes the operating point.
+
+### Read FI outputs
+
+| Output | Interpretation |
+|---|---|
+| `market_outcomes.csv` | `configured_participation` and resolved `participation`; FCR-only block payments/profit; realized response limit and fixed FI parameters. FI's FCR profit is zero. |
+| `time_series.csv` | Common `frequency_hz`, separate total FCR/FI power, each target/request, delivered response and `P_i,0 + response`. Historical `frequency_fcr_hz` is an alias of the combined controlled frequency. |
+| `fi_decisions.csv` | Every FI decision, even between output samples: sample, initial response, target, final response, target benchmark, predicted/actual settlement and interval cost/profit. |
+| `fi_time_series.csv` | Per-provider and aggregate signed payment rates and cumulative ledgers. Units are EUR/s for rates and EUR for balances. |
+| `fi_outcomes.csv` | Per-provider final cumulative target benchmark, prediction, gross rewards/penalties, net settlement, activation cost and profit. |
+| `summary.json` | `fi` gives aggregate event amounts, fixed-gamma policy and decision interval; `metrics` gives prediction and solver-refinement errors. |
+| `provider_responses.png` | Delivered response, FI targets and each mechanism's capability bounds. |
+| `fi_financials.png` | Individual and aggregate rates, three settlement quantities, rewards, penalties, costs and profit. |
+| `comparison_summary.csv` | Frequency metrics and FI totals for every scenario. |
+
+Gross penalties are positive magnitudes subtracted from gross rewards. Net
+settlement is the cash transfer; net profit also subtracts activation costs.
+The instantaneous-target benchmark is not money paid. Prediction and actual
+net settlement should agree to solver tolerance with these perfectly known
+dynamics, despite differing from the target benchmark. No-FI runs write empty
+FI outcome/decision tables, zero aggregate time series and an explanatory plot.
+
+All FI amounts cover `[0, final_time_s]`, including the shortened last interval.
+Residual response after that endpoint is not settled. FCR figures cover the
+whole delivery block. Do not directly rank the two products' profitability
+without defining a common horizon and event occurrence assumptions.
 
 ## Continuous offers and reserve safety margins
 
@@ -135,11 +243,6 @@ changes by provider ID, taking precedence over common changes:
 
 ~~~toml
 [[comparisons]]
-name = "no_penalty"
-label = "No penalty (all providers)"
-all_providers = { penalty_eur_per_missing_mw_block = 0.0 }
-
-[[comparisons]]
 name = "custom_uncertainty"
 label = "Higher uncertainty with bidding margins"
 market = { requirement_mw = 8.0, minimum_bid_mw = 0.5 }
@@ -154,8 +257,7 @@ Provider IDs must exist and cannot be renamed by overrides. Fields must exist
 in the base table or be supported optional fields (such as safety margin, fixed
 offers/awards, or manual gain). Misspelled override fields raise an error.
 
-The default `no_penalty` changes only all providers' penalty coefficients. The
-`lower_uncertainty` case changes only the uncertain renewable's variance. All
+The `lower_uncertainty` case changes only the uncertain renewable's variance. All
 variants use the same runner and inherit the seed unless overridden in their
 `scenario` table. CLI `--seed` overrides every selected case's seed. With the
 same seed and unchanged availability laws, the default cases preserve draws.
@@ -167,7 +269,7 @@ From the repository root in PowerShell:
 .\.venv\Scripts\python.exe scripts\run_fcr.py
 
 # One named configured scenario
-.\.venv\Scripts\python.exe scripts\run_fcr.py --scenario no_penalty --output-dir results\no_penalty
+.\.venv\Scripts\python.exe scripts\run_fcr.py --scenario lower_uncertainty --output-dir results\lower_uncertainty
 
 # Base and every configured comparison, including combined plots
 .\.venv\Scripts\python.exe scripts\run_fcr.py --compare

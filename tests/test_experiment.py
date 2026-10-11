@@ -15,7 +15,7 @@ import pandas as pd
 
 from functional_incentives import experiment
 from functional_incentives.availability import GaussianReserve
-from functional_incentives.providers import BlockProvider, QuadraticCommitmentCost
+from functional_incentives.providers import BlockProvider, QuadraticCommitmentCost, FIProviderParameters
 from functional_incentives.market import FCRCapacityOffer
 from functional_incentives.simulation import prepare_fcr_block
 
@@ -34,6 +34,47 @@ def provider(identity, price):
 
 
 class FCRBlockTests(unittest.TestCase):
+    def test_fi_assignment_optout_rejection_and_inactive_are_distinct(self):
+        def candidate(identity, price, mode):
+            return replace(provider(identity, price), participation=mode,
+                           fi_gamma_eur_per_hz_mw_s=10, fi_rho_eur_per_mw2_s=1)
+        participants = (candidate("assigned", 10, "fi"), candidate("cheap", 5, "fcr"),
+                        candidate("optout", 0, "fcr_or_fi"), candidate("rejected", 20, "fcr_or_fi"),
+                        candidate("inactive", 10, "inactive"))
+        block = prepare_fcr_block(participants, requirement_mw=4, nominal_frequency_hz=60,
+                                  rng=np.random.default_rng(1))
+        modes = dict(zip((p.provider_id for p in block.providers), block.participation_modes))
+        self.assertEqual(modes, dict(assigned="fi", cheap="fcr", optout="fi", rejected="fcr", inactive="inactive"))
+        self.assertEqual(sum(a.quantity_mw for a in block.market.awards), 4)
+        for p, s, response in zip(block.providers, block.settlements, block.response_parameters):
+            if modes[p.provider_id] == "fi":
+                self.assertEqual(s.awarded_mw, 0)
+                self.assertEqual(s.profit_eur, 0)
+                self.assertEqual(response.reserve_mw, s.available_mw)
+            elif p.provider_id in ("inactive", "rejected"):
+                self.assertEqual(response.reserve_mw, 0)
+        rejected = next(d for d in block.decisions if d.offer.provider_id == "rejected")
+        self.assertGreater(rejected.offer.quantity_mw, 0)
+        rng = np.random.default_rng(1)
+        rng_state = deepcopy(rng.bit_generator.state)
+        with self.assertRaisesRegex(ValueError, "Insufficient offered reserve"):
+            prepare_fcr_block([participants[0]], requirement_mw=1, nominal_frequency_hz=60, rng=rng)
+        self.assertEqual(rng.bit_generator.state, rng_state)
+
+    def test_fixed_modes_cannot_hide_fi_overlap_or_invent_an_endogenous_optout(self):
+        p = replace(provider("a", 10), participation="fi", fi_gamma_eur_per_hz_mw_s=10, fi_rho_eur_per_mw2_s=1)
+        for mode in ("fi", "inactive", "fcr_or_fi"):
+            with self.assertRaises(ValueError):
+                prepare_fcr_block([replace(p, participation=mode)], requirement_mw=0, nominal_frequency_hz=60,
+                                  rng=np.random.default_rng(1), fixed_offers=[FCRCapacityOffer("a", 10, 2)])
+        with self.assertRaises(ValueError):
+            prepare_fcr_block([p], requirement_mw=1, nominal_frequency_hz=60, rng=np.random.default_rng(1),
+                              fixed_awards_mw={"a": 1}, fixed_price_eur_per_mw_block=1)
+        with self.assertRaisesRegex(ValueError, "required"):
+            replace(provider("a", 10), participation="fi")
+        with self.assertRaisesRegex(ValueError, "participation"):
+            replace(p, participation="both")
+
     def test_awards_and_draws_keep_identity_and_decisions_precede_randomness(self):
         providers = (provider("b", 20), provider("a", 10))
         args = dict(requirement_mw=5, nominal_frequency_hz=60)
@@ -141,19 +182,18 @@ class ExperimentTests(unittest.TestCase):
         self.assertEqual(quantities[-1], 0)
         self.assertAlmostEqual(sum(a.quantity_mw for a in base.market.awards), 12)
         self.assertEqual(base.market.clearing_price_eur_per_mw_block, 24)
-        for name, _, changed in experiment.configured_scenarios(self.config)[1:]:
+        scenarios = experiment.configured_scenarios(self.config)
+        self.assertEqual([name for name, _, _ in scenarios],
+                         ["base", "lower_uncertainty", "fi_exogenous", "fi_endogenous", "fi_strong"])
+        for name, _, changed in scenarios[1:]:
             block = self.prepare(changed)
-            if name == "no_penalty":
-                self.assertTrue(all(p.penalty_eur_per_missing_mw_block == 0 for p in block.providers))
-                self.assertEqual([d.offer.quantity_mw for d in block.decisions], [4]*5)
-                self.assertEqual([a.quantity_mw for a in block.market.awards], [4, 4, 0, 4, 0])
-                self.assertEqual(block.market.clearing_price_eur_per_mw_block, 20)
-                self.assertEqual([s.available_mw for s in block.settlements],
-                                 [s.available_mw for s in base.settlements])
-                for original, altered in zip(self.config["providers"], changed["providers"]):
-                    self.assertEqual(altered, {**original, "penalty_eur_per_missing_mw_block": 0})
-            else:
+            if name == "lower_uncertainty":
                 self.assertAlmostEqual(block.decisions[-1].offer.quantity_mw, quantities[3])
+            else:
+                self.assertEqual(block.participation_modes[-1], "fi")
+                self.assertEqual([a.quantity_mw for a in block.market.awards],
+                                 [a.quantity_mw for a in base.market.awards])
+                self.assertIsInstance(block.response_parameters[-1], FIProviderParameters)
         relaxed = deepcopy(self.config)
         relaxed["market"]["minimum_bid_mw"] = .1
         self.assertTrue(0 < self.prepare(relaxed).decisions[-1].offer.quantity_mw < 1)
@@ -192,6 +232,31 @@ class ExperimentTests(unittest.TestCase):
             for filename in ["frequency_comparison.png", "provider_responses.png",
                              "offer_rewards.csv", "operating_point.json"]:
                 self.assertGreater((path/filename).stat().st_size, 0)
+
+    def test_fi_runner_saves_separate_finances_and_replayable_fixed_gamma(self):
+        config = next(c for name, _, c in experiment.configured_scenarios(self.config) if name == "fi_endogenous")
+        config["scenario"].update(final_time_s=2.03, output_time_step_s=.3, maximum_solver_step_s=.04)
+        config["fi"]["decision_interval_s"] = .17
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            with patch.object(experiment, "load_operating_point", return_value=self.point), redirect_stdout(io.StringIO()):
+                summary = experiment.run_experiment(config, path)
+            outcomes = pd.read_csv(path/"fi_outcomes.csv")
+            intervals = pd.read_csv(path/"fi_decisions.csv")
+            series = pd.read_csv(path/"fi_time_series.csv")
+            market = pd.read_csv(path/"market_outcomes.csv")
+            self.assertEqual(outcomes.provider_id.tolist(), ["renewable_uncertain"])
+            self.assertEqual(market.participation.tolist(), ["fcr"]*4 + ["fi"])
+            self.assertEqual(market.profit_eur.iloc[-1], 0)
+            self.assertGreater(outcomes.profit_eur.iloc[0], 0)
+            self.assertEqual(summary["fi"]["provider_count"], 1)
+            self.assertAlmostEqual(summary["fi"]["profit_eur"], outcomes.profit_eur.sum())
+            self.assertAlmostEqual(outcomes.profit_eur.sum(), intervals.profit_eur.sum())
+            self.assertAlmostEqual(series.total_profit_eur.iloc[-1], outcomes.profit_eur.sum())
+            self.assertEqual(intervals.end_time_s.iloc[-1], 2.03)
+            effective = json.loads((path/"effective_config.json").read_text())
+            self.assertEqual(effective["providers"][-1]["fi_gamma_eur_per_hz_mw_s"], 50)
+            self.assertGreater((path/"fi_financials.png").stat().st_size, 0)
 
     def test_cli_and_fixed_modes_are_configurable(self):
         config = deepcopy(self.config)
@@ -255,7 +320,9 @@ class ExperimentTests(unittest.TestCase):
         self.assertEqual(providers[-1].availability.variance_mw2, 9)
         self.assertEqual(config["providers"], original["providers"])
         self.assertEqual(variants[0][2]["providers"], original["providers"])
-        self.assertEqual(variants[1][2]["providers"][-1]["variance_mw2"], 4)
+        by_name = {name: variant for name, _, variant in variants}
+        self.assertEqual(by_name["lower_uncertainty"]["providers"][-1]["variance_mw2"], .04)
+        self.assertEqual(by_name["fi_exogenous"]["providers"][-1]["variance_mw2"], 4)
 
     def test_scenario_validation_rejects_typos_and_unknown_provider_ids(self):
         for extra in ({"unexpected": {}}, {"market": {"min_bid_mw": 2}},
@@ -269,13 +336,14 @@ class ExperimentTests(unittest.TestCase):
                 experiment.configured_scenarios(config)
 
     def test_cli_selects_one_named_scenario(self):
-        with (patch("sys.argv", ["run_fcr", "--scenario", "no_penalty"]),
+        with (patch("sys.argv", ["run_fcr", "--scenario", "lower_uncertainty"]),
               patch.object(experiment, "run_experiment") as run):
             experiment.main()
         self.assertEqual(run.call_count, 1)
         changed = run.call_args.args[0]
-        self.assertTrue(all(p["penalty_eur_per_missing_mw_block"] == 0
-                            for p in changed["providers"]))
+        expected = deepcopy(self.config["providers"])
+        expected[-1]["variance_mw2"] = .04
+        self.assertEqual(changed["providers"], expected)
         self.assertEqual(changed["market"], self.config["market"])
 
     def test_obsolete_grids_require_explicit_config_migration(self):

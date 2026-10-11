@@ -2,12 +2,13 @@ import unittest
 from dataclasses import replace
 
 import numpy as np
+from scipy.integrate import quad
 
 from functional_incentives.frequency import (
     LinearFrequencyParameters, analytical_no_fcr, damping_from_load_sensitivity,
     frequency_derivative_hz_per_s,
 )
-from functional_incentives.providers import FCRProviderParameters, droop_gain_mw_per_hz
+from functional_incentives.providers import FCRProviderParameters, FIProviderParameters, droop_gain_mw_per_hz
 from functional_incentives.simulation import simulate_fcr_power_step
 
 
@@ -89,6 +90,83 @@ class FrequencyDynamicsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             simulate_fcr_power_step(self.physical, self.providers, **self.event,
                                     output_time_step_s=.1, provider_operating_power_mw=[np.nan]*5)
+
+
+class FIDynamicsTests(unittest.TestCase):
+    def setUp(self):
+        self.physical = LinearFrequencyParameters(60, 5, 60, 1)
+        self.fi = FIProviderParameters("fi", .5, 4, 1000, 1)
+        self.event = dict(power_deficit_mw=1, start_time_s=.15, final_time_s=8.23)
+
+    def simulate(self, providers=None, **kwargs):
+        return simulate_fcr_power_step(self.physical, [self.fi] if providers is None else providers,
+            **self.event, fi_decision_interval_s=1, maximum_solver_step_s=.02, **kwargs)
+
+    def test_decision_clock_lag_and_actual_positive_negative_settlements(self):
+        trajectory = self.simulate(output_time_step_s=.17, provider_operating_power_mw=[10])
+        fi = trajectory.fi
+        records = fi.intervals
+        self.assertEqual([r["start_time_s"] for r in records], list(range(9)))
+        self.assertEqual(records[-1]["end_time_s"], 8.23)
+        self.assertEqual(records[0]["target_mw"], 0)  # event does not trigger a new decision
+        self.assertGreater(records[1]["target_mw"], 0)
+        self.assertLess(records[1]["final_response_mw"], records[1]["target_mw"])
+        self.assertTrue(any(r["gross_penalties_eur"] > 0 for r in records))
+        self.assertTrue(any(r["gross_rewards_eur"] > 0 for r in records))
+        for record in records:
+            duration = record["end_time_s"] - record["start_time_s"]
+            def response(t):
+                return (record["initial_response_mw"]*np.exp(-t/.5)
+                        + record["target_mw"]*(-np.expm1(-t/.5)))
+            def payment(t):
+                return -1000*record["sampled_frequency_error_hz"]*response(t)
+            reward = quad(lambda t: max(payment(t), 0), 0, duration, epsabs=1e-8)[0]
+            charge = quad(lambda t: max(-payment(t), 0), 0, duration, epsabs=1e-8)[0]
+            cost = quad(lambda t: .5*response(t)**2, 0, duration, epsabs=1e-10)[0]
+            self.assertAlmostEqual(record["gross_rewards_eur"], reward, places=5)
+            self.assertAlmostEqual(record["gross_penalties_eur"], charge, places=5)
+            self.assertAlmostEqual(record["activation_cost_eur"], cost, places=7)
+            self.assertAlmostEqual(record["net_settlement_eur"], record["predicted_settlement_eur"], places=6)
+            self.assertAlmostEqual(record["profit_eur"], reward-charge-cost, places=5)
+        np.testing.assert_allclose(fi.net_settlement_eur, fi.predicted_settlement_eur, atol=1e-6)
+        np.testing.assert_allclose(fi.profit_eur, fi.net_settlement_eur-fi.activation_cost_eur)
+        self.assertAlmostEqual(fi.net_settlement_eur[-1, 0], sum(r["net_settlement_eur"] for r in records))
+        self.assertTrue(np.all(np.abs(trajectory.provider_response_mw) <= 4+1e-8))
+        np.testing.assert_allclose(trajectory.provider_active_power_mw, 10+trajectory.provider_response_mw)
+
+    def test_output_clock_is_independent_and_final_partial_interval_is_settled(self):
+        fine = self.simulate(output_time_step_s=.05)
+        coarse = self.simulate(output_time_step_s=2)
+        self.assertEqual(fine.fi.intervals, coarse.fi.intervals)
+        self.assertEqual(fine.fi.profit_eur[-1, 0], coarse.fi.profit_eur[-1, 0])
+        np.testing.assert_array_equal(fine.provider_response_mw[-1], coarse.provider_response_mw[-1])
+        self.assertEqual(len(coarse.fi.intervals), 9)
+        self.assertNotEqual(coarse.fi.intervals[-1]["net_settlement_eur"], 0)
+
+    def test_multiple_fi_providers_share_samples_and_coexist_with_fcr(self):
+        providers = [self.fi, FCRProviderParameters("fcr", 20, .2, 2), replace(self.fi, provider_id="fi2")]
+        trajectory = self.simulate(providers, output_time_step_s=.1)
+        np.testing.assert_array_equal(trajectory.provider_response_mw[:, 0], trajectory.provider_response_mw[:, 2])
+        np.testing.assert_allclose(trajectory.total_fi_response_mw, 2*trajectory.provider_response_mw[:, 0])
+        np.testing.assert_allclose(trajectory.total_fcr_response_mw, trajectory.provider_response_mw[:, 1], atol=1e-14)
+        np.testing.assert_array_equal(trajectory.fi.sampled_frequency_error_hz[:, 0], trajectory.fi.sampled_frequency_error_hz[:, 1])
+        self.assertEqual(self.fi.gamma_eur_per_hz_mw_s, 1000)
+
+    def test_zero_gamma_zero_capacity_and_zero_event_remain_quiescent(self):
+        for p in (replace(self.fi, gamma_eur_per_hz_mw_s=0), replace(self.fi, reserve_mw=0)):
+            result = self.simulate([p], output_time_step_s=.2)
+            np.testing.assert_array_equal(result.provider_response_mw, 0)
+            np.testing.assert_array_equal(result.fi.profit_eur, 0)
+        self.event["power_deficit_mw"] = 0
+        result = self.simulate(output_time_step_s=.2)
+        np.testing.assert_array_equal(result.frequency_hz, 60)
+        np.testing.assert_array_equal(result.fi.profit_eur, 0)
+
+    def test_decision_interval_required_and_positive(self):
+        for interval in (None, 0, -1, np.inf, np.nan):
+            with self.assertRaisesRegex(ValueError, "fi_decision_interval_s"):
+                simulate_fcr_power_step(self.physical, [self.fi], **self.event,
+                    output_time_step_s=.1, fi_decision_interval_s=interval)
 
 
 class NormalizedDroopTests(unittest.TestCase):

@@ -1,7 +1,9 @@
 # Functional Incentives for Frequency Control
 
 ETH Zürich semester project. The current implementation covers **provider
-decisions, the FCR capacity market, and frequency dynamics**.
+decisions, the FCR capacity market, functional incentives (FI), and coupled
+frequency dynamics**. The TSO incentive strength is fixed by the user;
+FI providers optimize their own commands at each decision time.
 
 ## Run
 
@@ -18,11 +20,14 @@ There is one runner and one default configuration:
 and two renewable generators on the PJM 5-bus network.
 
 ~~~powershell
-# Base scenario plus the configured penalty/uncertainty comparisons
+# Base scenario plus all configured FCR/FI comparisons
 .\.venv\Scripts\python.exe scripts\run_fcr.py --compare
 
 # One named scenario
-.\.venv\Scripts\python.exe scripts\run_fcr.py --scenario no_penalty --output-dir results\no_penalty
+.\.venv\Scripts\python.exe scripts\run_fcr.py --scenario lower_uncertainty --output-dir results\lower_uncertainty
+
+# FI for providers who voluntarily opt out of FCR
+.\.venv\Scripts\python.exe scripts\run_fcr.py --scenario fi_endogenous --output-dir results\fi_endogenous
 
 # Different parameters, seed or destination
 .\.venv\Scripts\python.exe scripts\run_fcr.py --config configs\fcr.toml --seed 123 --output-dir results\my_run
@@ -77,7 +82,7 @@ keys rather than adding a second copy of the same TOML table or key.
 | Allow smaller positive bids | `market.minimum_bid_mw` | Change 1 to 0.1 MW. Small profitable offers may then replace voluntary opt-out; partial awards can already be below the minimum bid. |
 | Different bidding prices | Provider `minimum_bid_price_eur_per_mw_block`, `maximum_bid_price_eur_per_mw_block` | Change a provider's ceiling from 20 to 25. Positive optimized bids always use the ceiling because the reward has no acceptance model. |
 | More expensive reserve commitment | Provider `linear_cost_eur_per_mw_block`, `quadratic_cost_eur_per_mw2_block` | Increase either coefficient in `C(q) = a*q + 0.5*beta*q^2` and inspect the resulting offer. |
-| Different shortage penalties | Provider `penalty_eur_per_missing_mw_block` | Change 200 to 100 EUR per missing MW per block. The existing `no_penalty` comparison sets this to zero for all providers. |
+| Different shortage penalties | Provider `penalty_eur_per_missing_mw_block` | Change 200 to 100 EUR per missing MW per block. |
 | Different reserve uncertainty | Provider `mean_mw`, `variance_mw2` | For `renewable_uncertain`, change variance from 4 to 0.04 MW². Variance is the square of standard deviation; these moments describe the underlying Gaussian before bounding. |
 | Deterministic availability | Provider `variance_mw2`, `mean_mw` | Set variance to 0 and mean to 2 MW for exactly 2 MW available in every block. |
 | Different availability boundaries | `availability.boundary_mode` | Use `"truncated"` or `"clipped"`; clipping creates probability masses at zero and the physical cap. |
@@ -88,8 +93,12 @@ keys rather than adding a second copy of the same TOML table or key.
 | Less synchronous inertia | Conventional provider `inertia_s` | Change `conventional_1` from 5 to 2.5 s and inspect the initial frequency fall. Renewable inertia stays zero in this model. |
 | Different machine or converter size | Provider `rating_mva` | The rating sets the droop power base and, for conventional machines, contributes to inertia. Active-power limits remain separate inputs. |
 | Different load sensitivity | `scenario.load_frequency_sensitivity` | Change 1 to 0.5 to reduce frequency-dependent load damping. |
+| Stronger/weaker FI payment | Provider `fi_gamma_eur_per_hz_mw_s` | Change 50 to 100 in an FI scenario; gamma stays fixed during the event. |
+| More expensive FI activation | Provider `fi_rho_eur_per_mw2_s` | Increase the positive coefficient of delivered-power cost `rho*z²/2` in EUR/s. |
+| Faster/slower FI decisions | `fi.decision_interval_s` | Change 0.1 to 0.5 s; frequency samples and commands are held between decisions. |
+| Refine numerical integration | `scenario.maximum_solver_step_s` | Set 0.02 s explicitly; this does not change the FI decision clock. |
 
-Prices, cost coefficients and penalties apply to the **whole delivery block**.
+FCR prices, cost coefficients and penalties apply to the **whole delivery block**.
 Changing `market.block_duration_hours` does not automatically rescale them or
 change the simulated event horizon. The additional bidding safety margin
 defaults to zero; physical headroom is already enforced. If its bid ceiling
@@ -97,6 +106,65 @@ falls below the minimum bid, that provider offers zero. If total offered supply
 falls below the market requirement, the run stops with an insufficient-reserve
 error. Adjust the scenario's demand or provider assumptions to study a feasible
 case; the simulator does not procure a partial requirement automatically.
+
+### Play with functional incentives
+
+The base scenario preserves the FCR-only experiment. Three additional scenarios
+at the end of the TOML enable FI for `renewable_uncertain`:
+
+| Scenario | Participation rule | Gamma |
+|---|---|---:|
+| `fi_exogenous` | Assigned to FI before bidding | 50 |
+| `fi_endogenous` | FI only after an optimized zero FCR offer | 50 |
+| `fi_strong` | Same endogenous rule | 200 |
+
+Edit `fi_gamma_eur_per_hz_mw_s` in the selected comparison to vary incentive
+strength. For example, change 50 to 100 in `fi_endogenous`, then rerun the
+command above into a new output directory. Gamma has units EUR/(Hz MW s).
+`fi_rho_eur_per_mw2_s = 1.0` sets the activation-cost rate coefficient and must
+be positive. These values are pedagogical assumptions.
+
+To configure participation directly, put these fields in an existing provider
+table (or its named comparison override):
+
+~~~toml
+participation = "fcr_or_fi"
+fi_gamma_eur_per_hz_mw_s = 50.0
+fi_rho_eur_per_mw2_s = 1.0
+~~~
+
+Use `"fi"` for an exogenous assignment, `"fcr"` for the default FCR-only policy,
+or `"inactive"` for zero controlled response. A positive FCR bid rejected by the
+auction **never enables FI**. `fcr_or_fi` requires optimized bids and implements
+sequential FCR opt-out; it does not compare expected profits from both products.
+FI capability is the provider's realized availability, and FI power does not
+count toward contracted FCR procurement.
+
+The provider observes sampled frequency error `e_k` and its current delivered
+power, then chooses a target maximizing predicted payment minus activation cost
+over the next decision interval. Its first-order dynamics determine actual
+power `z(t)`. Settlement integrates `-gamma * e_k * z(t)` over time; it can
+reward or charge the provider. Gamma is never optimized or retuned.
+
+Inspect `provider_responses.png` for command versus delivery and
+`fi_financials.png` for the corresponding money. In `fi_outcomes.csv`:
+
+- `target_benchmark_eur` assumes immediate delivery of every command.
+- `predicted_settlement_eur` accounts for known response lag.
+- `net_settlement_eur` integrates actual delivery, subtracting gross penalties
+  from gross rewards. `profit_eur` also subtracts activation costs.
+
+Predicted and actual settlement agree within solver tolerance with the current
+perfect-information assumptions. FI amounts cover the simulated event, whereas
+FCR financial quantities cover the whole delivery block. The model has no TSO
+outer optimization, secondary restoration or energy-storage constraints.
+Larger gamma is not guaranteed to improve frequency or profitability.
+
+The `[fi]` decision interval is independent of output sampling and the RK45
+step limit. Set `scenario.maximum_solver_step_s` explicitly when changing the
+output grid alone; its backward-compatible default is the output step.
+The [configuration guide](docs/CONFIGURATION.md) explains timing, all financial
+outputs, fixed modes and how to add a gamma comparison.
 
 ### Save experiments as named scenarios
 
@@ -122,7 +190,7 @@ all_providers = { reserve_safety_margin_fraction = 0.1 }
 
 Each scenario starts from the base values in the file, independently of the
 other comparisons. A `market = { requirement_mw = 10.0 }` entry overrides market
-settings; `scenario`, `decision` and `availability` work the same way.
+settings; `scenario`, `decision`, `availability` and `fi` work the same way.
 `all_providers` changes every provider, while `providers` changes the named IDs
 and takes precedence over common changes. For a common penalty policy, use
 `all_providers = { penalty_eur_per_missing_mw_block = 100.0 }` inside a comparison.
@@ -163,8 +231,8 @@ For prescribed offers, use `decision.mode = "fixed"` with per-provider
    Gaussian reserve-shortage penalties, the minimum bid and safety margin.
 3. Clear the FCR market for awards $q_i^\star$ and a uniform price.
 4. Draw availability once per provider.
-5. Simulate frequency and provider response with
-   $q_i^{\mathrm{eff}}=\min(q_i^\star,A_i)$.
+5. Simulate FCR response with $q_i^{\mathrm{eff}}=\min(q_i^\star,A_i)$, FI
+   decisions and delayed response within $[-A_i,A_i]$, and their common frequency.
 6. Save decisions, payments, penalties, profit, trajectories and numerical checks.
 
 The equations, units, assumptions and current results are in
@@ -172,7 +240,7 @@ The equations, units, assumptions and current results are in
 fixed awards, deterministic availability and earlier parameter sets, are in
 [docs/CONFIGURATION.md](docs/CONFIGURATION.md). All use the same implementation.
 
-## Current result
+## Current FCR baseline
 
 With the default seed 20261008:
 
@@ -199,8 +267,9 @@ caps and `reserve_safety_margin_fraction` are configurable in the TOML. The
 safety margin defaults to zero and limits bids after physical headroom checks;
 it does not change the availability law. `market.minimum_bid_mw` sets the market
 minimum. Each comparison can override configuration sections, all providers,
-or individual provider IDs. The `no_penalty` case now removes every provider's
-penalty. See the configuration guide for examples and fixed modes.
+or individual provider IDs. The configured cases compare base with lower
+renewable uncertainty and three FI policies. See the configuration guide for
+examples and fixed modes.
 
 ## Outputs
 
@@ -212,11 +281,14 @@ figure. Reusing a destination replaces its generated files.
 |---|---|
 | `effective_config.json` | Actual parameters and seed; can be passed back to `--config` |
 | `operating_point.json` | Solved dispatch, ratings and inertia |
-| `market_outcomes.csv` | Offers, awards, draws, effective reserve and block accounting |
+| `market_outcomes.csv` | Participation roles, offers, awards, draws, effective reserve and FCR block accounting |
 | `offer_rewards.csv` | Diagnostic reward at zero, feasible endpoints and the selected offer; not a search grid |
-| `time_series.csv` | Frequency, requested/delivered responses and total generator powers |
-| `summary.json` | Price, payments and numerical checks |
+| `time_series.csv` | Frequency, separate FCR/FI totals, requested/delivered responses and generator powers |
+| `fi_decisions.csv` | Every FI decision with interval benchmark, prediction and actual settlement |
+| `fi_time_series.csv`, `fi_outcomes.csv` | Individual and aggregate FI rates, balances and final profit |
+| `summary.json` | FCR price/payments, aggregate FI amounts and numerical checks |
 | `frequency_comparison.png`, `provider_responses.png` | Physical trajectories |
+| `fi_financials.png` | FI signed rates, settlement comparisons, costs and profit |
 | `comparison_summary.csv`, `comparison_providers.csv`, `scenario_comparison.png` | Additional outputs for `--compare` |
 
 Generated results are ignored by Git.
@@ -230,8 +302,9 @@ implementations or empty incentive packages.
 |---|---|
 | `grid.py` | ANDES operating point, configurable fleet and inertia |
 | `availability.py` | Gaussian sampling and expected shortage |
-| `providers.py` | Capability, cost parameters and droop response |
-| `decision.py` | Offer evaluation, exact price optimum and bounded continuous quantity optimization |
+| `providers.py` | Capability, FCR/FI dynamics, fixed incentive and cost parameters |
+| `decision.py` | FCR offer optimization and exact FI interval best response |
+| `incentives.py` | FI rates, analytical payment prediction and actual financial records |
 | `market.py` | Clearing, explicit fixed allocation and settlement |
 | `frequency.py` | Frequency equation and analytical no-FCR reference |
 | `simulation.py` | Block sequencing and coupled numerical dynamics |
@@ -240,12 +313,14 @@ implementations or empty incentive packages.
 | `experiment.py` | Configuration, orchestration, output and command line |
 
 There are five focused test files covering decisions, market, dynamics,
-operating points and the complete experiment. **All 46 tests pass.** All three
-configured scenarios were rerun with regenerated plots. The model guide records
-old/new offers, awards, prices and frequency responses. Generated baseline
-records are in `results/discrete_baseline/`, with a detailed provider comparison
-in `results/fcr/bidding_update_comparison.csv`.
+operating points and the complete experiment. **All 58 tests pass**, including
+FI optimality, signed settlement, delayed delivery, separate clocks and participation
+exclusivity. All five configured scenarios were run under `results/fcr_fi/`.
+With the default seed, gamma 50 improves the sampled nadir from 59.919129 to
+59.948176 Hz and yields FI net settlement of EUR 61.4103 and profit of EUR 30.7072
+over 40 seconds. FCR awards and its 24 EUR/MW/block price stay the same.
+These are single-event illustrative outcomes, not a general policy result.
 
-Functional incentives remain future work. Local research PDFs in `references/`
+Local research PDFs in `references/`
 and notes in `local_context/` are intentionally outside Git. Consult
 `local_context/NOW.md` and `DECISIONS.md` when present.

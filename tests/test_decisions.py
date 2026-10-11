@@ -4,12 +4,74 @@ from types import SimpleNamespace
 
 import numpy as np
 from scipy.optimize import brentq
+from scipy.integrate import quad
 from scipy.stats import norm, truncnorm
 
 from functional_incentives.availability import GaussianReserve
-from functional_incentives.decision import choose_capacity_offer
-from functional_incentives.providers import QuadraticCommitmentCost
+from functional_incentives.decision import choose_capacity_offer, choose_fi_target
+from functional_incentives.providers import QuadraticCommitmentCost, FIProviderParameters, first_order_response_integrals
+from functional_incentives.incentives import predict_fi_financials, fi_financial_rates
 from functional_incentives.providers import symmetric_reserve_capacity_mw
+
+
+class FITargetTests(unittest.TestCase):
+    def test_exact_optimum_matches_independent_quadrature_and_feasible_alternatives(self):
+        provider = FIProviderParameters("fi", .6, 3, 12, 2)
+        for error, initial, duration in ((-.1, 0, .3), (.1, 1, 1.3), (0, 1, .2), (-2, 0, .1)):
+            with self.subTest(error=error, initial=initial):
+                decision = choose_fi_target(provider, sampled_frequency_error_hz=error,
+                                            initial_response_mw=initial, duration_s=duration)
+                def objective(target):
+                    def rate(t):
+                        z = initial*np.exp(-t/.6) + target*(-np.expm1(-t/.6))
+                        return -12*error*z - z*z
+                    return quad(rate, 0, duration, epsabs=1e-12)[0]
+                self.assertAlmostEqual(decision.predicted_profit_eur, objective(decision.target_mw), places=10)
+                self.assertLessEqual(abs(decision.target_mw), 3)
+                for alternative in np.linspace(-3, 3, 301):
+                    self.assertGreaterEqual(decision.predicted_profit_eur + 1e-10, objective(alternative))
+
+    def test_delayed_delivery_and_signed_payments_are_separate_from_target(self):
+        p = FIProviderParameters("fi", 1, 2, 10, 1)
+        decision = choose_fi_target(p, sampled_frequency_error_hz=-.2, initial_response_mw=0, duration_s=.5)
+        self.assertEqual(decision.target_mw, 2)
+        self.assertAlmostEqual(decision.target_benchmark_eur, 2)
+        self.assertAlmostEqual(decision.predicted_settlement_eur, 4*(.5-1+np.exp(-.5)))
+        self.assertLess(decision.predicted_settlement_eur, decision.target_benchmark_eur)
+        self.assertEqual(fi_financial_rates(p, .1, 2), (0, 2, 2))
+        self.assertEqual(fi_financial_rates(p, -.1, 2), (2, 0, 2))
+        self.assertEqual(fi_financial_rates(p, .1, -2), (2, 0, 2))
+        payment, cost = predict_fi_financials(p, sampled_frequency_error_hz=.1,
+                                             initial_response_mw=2, target_mw=-2, duration_s=.1)
+        self.assertLess(payment, 0)  # a beneficial new target cannot erase existing wrong-sign delivery
+        self.assertGreater(cost, 0)
+
+    def test_moments_are_stable_for_short_and_long_intervals(self):
+        for h in (1e-8, 1e-4, .001, .1, 2, 100):
+            moments = first_order_response_integrals(1, h)
+            functions = (lambda t: np.exp(-t), lambda t: -np.expm1(-t),
+                         lambda t: np.exp(-2*t), lambda t: np.exp(-t)*-np.expm1(-t),
+                         lambda t: np.expm1(-t)**2)
+            expected = [h*quad(lambda s: fun(h*s), 0, 1, epsabs=1e-30)[0] for fun in functions]
+            np.testing.assert_allclose(moments, expected, rtol=2e-9, atol=0)
+        self.assertEqual(first_order_response_integrals(1, 0), (0, 0, 0, 0, 0))
+
+    def test_zero_incentive_availability_and_invalid_inputs(self):
+        for gamma, reserve in ((0, 2), (10, 0)):
+            decision = choose_fi_target(FIProviderParameters("fi", .2, reserve, gamma, 1),
+                                        sampled_frequency_error_hz=-.1, initial_response_mw=0, duration_s=.1)
+            self.assertEqual(decision.target_mw, 0)
+            self.assertEqual(decision.predicted_profit_eur, 0)
+        for field in range(1, 5):
+            for invalid in (-1, np.inf, np.nan):
+                args = ["fi", 1, 2, 10, 1]
+                args[field] = invalid
+                with self.assertRaises(ValueError):
+                    FIProviderParameters(*args)
+        for duration in (0, -1, np.nan):
+            with self.assertRaises(ValueError):
+                choose_fi_target(FIProviderParameters("fi", 1, 2, 10, 1),
+                                 sampled_frequency_error_hz=0, initial_response_mw=0, duration_s=duration)
 
 
 class GaussianReserveTests(unittest.TestCase):

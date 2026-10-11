@@ -1,4 +1,4 @@
-"""Provider capability, cost parameters and first-order droop response."""
+"""Provider capability, cost parameters and first-order FCR/FI response."""
 
 from __future__ import annotations
 
@@ -139,10 +139,23 @@ class BlockProvider:
     reserve_safety_margin_fraction: float = 0.0
     technology: str = "unspecified"
     gain_mw_per_hz: float | None = None
+    participation: str = "fcr"
+    fi_gamma_eur_per_hz_mw_s: float | None = None
+    fi_rho_eur_per_mw2_s: float | None = None
 
     def __post_init__(self) -> None:
         if not self.provider_id.strip() or not self.generator_id.strip():
             raise ValueError("provider and generator identities cannot be empty")
+        if self.participation not in ("fcr", "fi", "fcr_or_fi", "inactive"):
+            raise ValueError("participation must be fcr, fi, fcr_or_fi or inactive")
+        for name, positive in (("fi_gamma_eur_per_hz_mw_s", False),
+                               ("fi_rho_eur_per_mw2_s", True)):
+            value = getattr(self, name)
+            if value is None:
+                if self.participation in ("fi", "fcr_or_fi"):
+                    raise ValueError(f"{name} is required for FI participation")
+            elif not isfinite(value) or value < 0 or (positive and value == 0):
+                raise ValueError(f"invalid {name}")
         if (not isfinite(self.reserve_safety_margin_fraction)
                 or not 0 <= self.reserve_safety_margin_fraction <= 1):
             raise ValueError("reserve_safety_margin_fraction must lie in [0, 1]")
@@ -165,3 +178,58 @@ class BlockProvider:
         This does not change the availability law, dispatch, inertia or droop.
         """
         return (1.0 - self.reserve_safety_margin_fraction) * self.availability.capacity_mw
+
+
+@dataclass(frozen=True)
+class FIProviderParameters:
+    """Fixed incentive and realized capability for T*dz/dt = -z + target.
+
+    reserve_mw is available physical modulation A, not an FCR award. Gamma
+    is fixed by the user; rho is the coefficient of the cost rate rho*z^2/2.
+    """
+
+    provider_id: str
+    time_constant_s: float
+    reserve_mw: float
+    gamma_eur_per_hz_mw_s: float
+    rho_eur_per_mw2_s: float
+
+    def __post_init__(self) -> None:
+        if not self.provider_id.strip():
+            raise ValueError("provider_id cannot be empty")
+        for name, positive in (("time_constant_s", True), ("reserve_mw", False),
+                               ("gamma_eur_per_hz_mw_s", False), ("rho_eur_per_mw2_s", True)):
+            value = getattr(self, name)
+            if not isfinite(value) or value < 0 or (positive and value == 0):
+                raise ValueError(f"invalid FI {name}")
+
+    def response_derivative_mw_per_s(self, response_mw: float, target_mw: float) -> float:
+        return (target_mw - response_mw) / self.time_constant_s
+
+    def predicted_response_mw(self, initial_mw: float, target_mw: float, elapsed_s: float) -> float:
+        return float(initial_mw + (target_mw - initial_mw)
+                     * -np.expm1(-elapsed_s / self.time_constant_s))
+
+
+def first_order_response_integrals(time_constant_s: float, duration_s: float) -> tuple[float, ...]:
+    """Integrals of a, b, a^2, a*b, b^2 for z=a*z0+b*v, a=exp(-t/T).
+
+    Small-interval series avoid cancellation in the target's linear/quadratic
+    coefficients. These physical moments serve both prediction and decisions.
+    """
+    if not isfinite(time_constant_s) or time_constant_s <= 0:
+        raise ValueError("time constant must be finite and positive")
+    if not isfinite(duration_s) or duration_s < 0:
+        raise ValueError("duration must be finite and nonnegative")
+    x = duration_s / time_constant_s
+    decay_change = -np.expm1(-x)
+    a = time_constant_s * decay_change
+    aa = time_constant_s * (-np.expm1(-2*x)) / 2
+    ab = time_constant_s * decay_change**2 / 2
+    if x < 1e-3:
+        b = duration_s * x * (1/2 + x*(-1/6 + x*(1/24 + x*(-1/120 + x/720))))
+        bb = duration_s * x*x * (1/3 + x*(-1/4 + x*(7/60 + x*(-1/24 + x*31/2520))))
+    else:
+        b = duration_s - a
+        bb = duration_s - 2*a + aa
+    return float(a), float(b), float(aa), float(ab), float(bb)

@@ -1,4 +1,4 @@
-"""Independent offer decisions: R(c,q) = c*q - C(q) - expected shortage penalty."""
+"""FCR offer rewards and myopic FI target decisions with predicted response lag."""
 
 from __future__ import annotations
 
@@ -8,7 +8,8 @@ from math import isfinite
 from scipy.optimize import minimize_scalar
 
 from .availability import GaussianReserve
-from .providers import QuadraticCommitmentCost
+from .providers import QuadraticCommitmentCost, FIProviderParameters, first_order_response_integrals
+from .incentives import predict_fi_financials
 from .market import FCRCapacityOffer
 
 
@@ -103,3 +104,46 @@ def choose_capacity_offer(
         if candidate.expected_reward_eur > best.expected_reward_eur:
             best = candidate
     return best
+
+
+@dataclass(frozen=True)
+class FITargetDecision:
+    target_mw: float
+    target_benchmark_eur: float
+    predicted_settlement_eur: float
+    predicted_activation_cost_eur: float
+
+    @property
+    def predicted_profit_eur(self) -> float:
+        return self.predicted_settlement_eur - self.predicted_activation_cost_eur
+
+
+def choose_fi_target(
+    provider: FIProviderParameters, *, sampled_frequency_error_hz: float,
+    initial_response_mw: float, duration_s: float,
+) -> FITargetDecision:
+    """Exact constrained maximizer of integral(-gamma*e_k*z - rho*z^2/2).
+
+    For z=a*z0+b*v the objective is a concave quadratic in the held target v.
+    Differentiating gives v=(-gamma*e_k*integral(b)/rho-z0*integral(a*b)) /
+    integral(b^2). Projecting onto [-A,A] gives its unique feasible optimum.
+    This optimizes the provider's action, never the fixed incentive parameter.
+    """
+    if not all(isfinite(x) for x in (sampled_frequency_error_hz, initial_response_mw, duration_s)):
+        raise ValueError("FI decision inputs must be finite")
+    if duration_s <= 0 or abs(initial_response_mw) > provider.reserve_mw + 1e-8:
+        raise ValueError("FI decision requires positive duration and feasible initial response")
+    _, b, _, ab, bb = first_order_response_integrals(provider.time_constant_s, duration_s)
+    if bb <= 0:
+        raise ValueError("FI interval is too small relative to the response time")
+    price = -provider.gamma_eur_per_hz_mw_s * sampled_frequency_error_hz
+    unconstrained = (price*b/provider.rho_eur_per_mw2_s - initial_response_mw*ab) / bb
+    target = float(max(-provider.reserve_mw, min(provider.reserve_mw, unconstrained)))
+    payment, cost = predict_fi_financials(
+        provider, sampled_frequency_error_hz=sampled_frequency_error_hz,
+        initial_response_mw=initial_response_mw, target_mw=target, duration_s=duration_s,
+    )
+    benchmark = price * target * duration_s
+    if not all(isfinite(x) for x in (unconstrained, payment, cost, benchmark)):
+        raise ValueError("FI decision produced a non-finite value")
+    return FITargetDecision(target, benchmark, payment, cost)
