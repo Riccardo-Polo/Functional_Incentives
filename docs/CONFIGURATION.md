@@ -4,6 +4,263 @@ Use `scripts/run_fcr.py` with [configs/fcr.toml](../configs/fcr.toml).
 The runner also accepts the `effective_config.json` saved by any current run.
 There are no separate teaching, linear-frequency or market-stage runners.
 
+The post-Week-5 study is specified in [NEXT_STEPS.md](NEXT_STEPS.md).
+Keep the Week 5 baseline reproducible; introduce source-informed parameter
+changes separately using [PARAMETER_SOURCES.md](PARAMETER_SOURCES.md).
+The ordinary event settings remain unchanged. The opt-in `[tso]` table now
+controls the common-gamma trade-off study; `[tso_optimizer]` controls the
+weighted search. Both use the existing physical/provider simulator.
+
+For the first saturation scan, start from `fi_exogenous` and override only
+`renewable_uncertain.fi_gamma_eur_per_hz_mw_s` through provider-ID overrides
+(as shown below), keeping the seed, availability law and all other inputs fixed.
+Every comparison starts from base, so each new FI comparison must also specify
+the provider's FI participation, gamma and rho. A comparison does not inherit
+another named comparison. Reconstruct the free target from decision records
+using the current formula, or add explicit diagnostics in the planned update;
+the current output does not include a dedicated unconstrained-target column.
+
+Vary `time_constant_s` and `fi.decision_interval_s` only in separate sensitivity
+studies. They change the controller/dynamics; solver refinement instead keeps
+both fixed and reduces `maximum_solver_step_s` or tightens tolerances.
+
+## AEMO-inspired FPP fixed-policy benchmark
+
+Current study: use `--fpp-benchmark --config configs/aemo_fpp_metered.toml
+--output-dir results/aemo_fpp_metered`. Meters read actual P_i,0 plus delivered
+response; dispatch targets are settlement-only references. This overlay selects
+`assessment_schedule = "balanced_ramp"`: initial DT equals solved P_i,0, and
+the 300 s target is 261 MW for C1, 309 MW for C2, unchanged for the other units.
+The 1 MW balanced reallocation is prescribed, not optimized. Future DT selection
+remains open. A constant-reference delivery check is saved separately.
+
+Use `--fpp-benchmark --config configs/aemo_fpp.toml --output-dir results/aemo_fpp`.
+This overlay starts from `fi_endogenous` and extends the horizon to 300 seconds,
+while retaining solved machine parameters, market inputs and availability laws.
+It prescribes a constant assessment reference and a balanced-reference illustration.
+Historical saved runs used ideal tracking; new runs always meter actual output.
+Source-defined sampling/filter/reliability constants are fixed in a versioned
+profile, not ordinary tuning parameters. External directional price metadata is
+optional; absent prices produce MW h repricing coefficients and missing monetary
+fields. No FCR-price substitution or implicit currency conversion is permitted.
+See [AEMO_FPP.md](AEMO_FPP.md) for fields, equations, provenance and commands.
+Use `--fpp-report STUDY_DIR` for report-only regeneration; a new simulation needs
+a new output directory. FPP and TSO optimization flags are mutually exclusive.
+There is currently no FPP-provider optimization flag or configured monetary
+objective. Its design is the next task; see
+[AEMO_FPP.md](AEMO_FPP.md#next-research-step-fpp-provider-optimization).
+
+For the separate deficit-to-surplus study, use `configs/aemo_fpp_reversal.toml`
+and `results/aemo_fpp_reversal/`. It preserves the initial +10 MW deficit at 1 s
+and sets the **absolute net deficit** to -7 MW at 120.05 s (a -17 MW change):
+
+```toml
+[[disturbance_changes]]
+time_s = 120.05
+net_power_deficit_mw = -7.0
+```
+
+Further entries must be strictly ordered inside the horizon. These are
+prescribed scenario inputs, not new decisions or availability draws. All other
+FPP overlay inputs, assessment/delivery streams and prices match the original
+benchmark. The base `fcr.toml` and accepted TSO experiments remain unchanged.
+
+## Weighted TSO optimization
+
+The controlled [FCR procurement study](FCR_REQUIREMENT_STUDY.md) uses
+`configs/fcr_requirement.toml` to derive reduced-demand cases from saved
+A/B/C fleet runs. `--tso-procurement` permits only a change to
+`market.requirement_mw`; gamma is reoptimized after each clearing.
+`--tso-procurement-report` reads the completed runs without integrations.
+Neither mode overwrites the original fleet results or changes machine parameters.
+
+Use `--scenario fi_endogenous --tso-optimize --frequency-weight 10000
+--output-dir results/tso_optimization`. The user authorized choosing 10000
+EUR/(Hz² s) as a demonstration weight on 15 October and confirmed the current
+five-provider FI configuration (the original request called it Week4).
+Machine/market parameters are unchanged; the disturbance is 10 MW at 1 s,
+H = 40 s and the FI decision interval is 0.1 s. This is not a calibrated valuation.
+
+`--tso-optimize` and `--tso-sweep` are mutually exclusive; neither accepts
+`--compare`. `--frequency-weight` is accepted only in optimization mode and
+overrides `tso_optimizer.frequency_weight_eur_per_hz2_s`. The repository gives
+no default weight: missing, zero, negative or nonfinite values are rejected.
+There is no automatic budget or hard frequency constraint.
+
+| `[tso_optimizer]` setting | Initial value | Meaning |
+|---|---:|---|
+| `frequency_weight_eur_per_hz2_s` | required explicitly | Positive w_f; CLI can supply/override it. |
+| `gamma_max` | 300 | Finite positive upper search limit, never enlarged automatically. |
+| `grid_points` | 7 | Uniform initial grid including zero and upper limit; add 50/200 when in range. |
+| `gamma_tolerance` | 1 | Desired spacing next to observed local minima; not a global error bound. |
+| `max_refinement_rounds` | 8 | Cap on midpoint refinement rounds; unfinished local resolution is reported. |
+| `design_samples` | 8 | IID draws shared by all candidates; at least two. |
+| `validation_samples` | 8 | Independent draws evaluated only at the selected gamma; at least two. |
+| `seed` | 20261015 | Fresh SeedSequence children: design 0, validation 1, delivery 2. |
+
+`--seed` overrides this optimizer seed. The ordinary scenario seed is unused
+in this mode. A single outer experiment entails multiple candidate/draw ODE
+runs, followed by one actual delivery event. These small sample counts are an
+initial functional check; independent validation intervals expose sampling
+uncertainty and do not certify optimality. A larger study is a separate action.
+
+Offers/awards/roles are frozen before sampling. Every eligible FI response uses
+the same candidate gamma; rho, physical capability, FCR gains and dynamics stay
+configured. Optimization mode does not require a redundant per-provider manual
+gamma: zero is used during clearing, which is independent of gamma. Fixed-gamma
+ordinary mode still requires explicit provider coefficients.
+
+Grid evaluation is followed by midpoint refinement beside every observed local
+minimum (plus the best candidate). Exact ties choose smaller gamma. All tested
+values compete with endpoints, without a convexity/unimodality assumption.
+Report the best tested candidate, local spacing and boundary status; narrow
+unobserved minima can be missed. Validation does not refine or choose gamma.
+The two extreme design FI-capacity draws (one if identical) receive tighter
+solver checks at the selected gamma, using the same provider clock and draws.
+Failed realizations/checks invalidate the run; no selective sample dropping.
+
+Outputs under the selected directory:
+
+- `effective_config.json`, `operating_point.json`, `market.json`: replay inputs,
+  cleared allocation/roles and physical parameters. Replay with `--tso-optimize`.
+- `availability_samples.csv`, `sample_outcomes.csv`: design/validation draws;
+  all candidate metrics, per-draw J and wall/CPU times, plus the delivery outcome.
+- `gamma_summary.csv`, `summary.json`: separate E_f, net/gross FI money, cost,
+  saturation and J, means/SE/Student-t 95% intervals, search settings/status/counts.
+  J is composed per sample before uncertainty estimation to retain covariance.
+  Design intervals do not correct selection bias; one delivery has no SE/interval.
+- `numerical_checks.csv`: selected-candidate solver refinement.
+- `selected_config.json`, `delivery_availability.json`: announced gamma and the
+  actual third-stream draw. A fixed-gamma replay must also reuse this saved draw;
+  invoking ordinary mode alone uses its own seed and does not reproduce delivery.
+- `time_series.csv`, `fi_decisions.csv`, `fi_time_series.csv`, `fi_outcomes.csv`:
+  the single delivered event, including actual powers and FI ledgers.
+- `run_status.json`: authoritative completion/failure flag when reusing a folder.
+
+Timings use both `perf_counter` wall time and process CPU time. Setup, banks,
+candidate evaluations, numerical checks, validation, delivery and exports are
+recorded. Search timing includes checkpoint exports; export totals overlap it
+and must not be added again. Total excludes Python/module startup and final
+summary writes. No plots are generated in optimization mode. FCR block payments
+remain separate from event FI money. Interpretation is conditional on the
+configured parameters, disturbance, sample bank and user weight.
+
+## Comparing TSO weights
+
+On 15 October the user selected a first comparison of three frequency weights,
+before changing availability laws. The demonstration uses 5000, 10000 and
+20000 EUR/(Hz² s). All other machine, market, disturbance, horizon, numerical
+and sample-bank settings remain fixed. These are preference scenarios, not
+three different physical systems or calibrated market valuations.
+
+Reuse the existing central run, and compute only the two additional weights:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/run_fcr.py --config results/tso_optimization/effective_config.json --tso-optimize --frequency-weight 5000 --output-dir results/tso_weights/wf5000
+.\.venv\Scripts\python.exe scripts/run_fcr.py --config results/tso_optimization/effective_config.json --tso-optimize --frequency-weight 20000 --output-dir results/tso_weights/wf20000
+.\.venv\Scripts\python.exe scripts/run_fcr.py --tso-report results/tso_weights/wf5000 results/tso_optimization results/tso_weights/wf20000 --output-dir results/tso_weights
+```
+
+`--tso-report` reads completed optimizer output directories, and accepts no
+config/scenario/seed overrides or other simulation mode. It rejects differences
+in physical/economic settings, search settings other than weight, cleared market,
+availability banks, delivery draw or trajectory output times. Input weights must
+be distinct. Put the report outside the individual run directories; its folder
+may contain new runs as subdirectories. `comparison.json` references all inputs,
+so the existing 10000 run is not duplicated. Keep those referenced directories.
+
+The report recomputes only gamma-zero references: once for each saved validation
+draw and once for the common delivery draw (nine integrations with N=8). It
+verifies that current preparation reproduces the saved market and physical
+parameters. It does not optimize gamma again or use validation to select it.
+The FCR-only reference retains the same market and availability; FI commands
+and transfers are zero at gamma zero.
+
+Outputs include `frequency`, `fi_response`, `fi_finances` and
+`provider_responses`, each as a vector PDF and PNG preview in Week 5 style.
+These show the **same single delivery realization** for all three policies;
+they are not mean trajectories. Capacity lines are read from saved availability,
+not hard-coded from old slides. The FI response figure separates held target
+and delivered power and zooms into the first decisions. Financial panels use a
+common monetary scale and retain actual net payment, activation cost and profit.
+
+`comparison_summary.csv` separates validation means/uncertainty from delivery
+outcomes. `baseline_samples.csv` and `baseline_delivery.csv` save the matched
+reference, while `paired_baseline_differences.csv` contains per-draw reductions
+in E_f and in each policy's own weighted J. Do not rank absolute J values across
+different w_f: they represent different valuations. Small N=8 results are
+exploratory; the same draws permit controlled comparisons, not a global policy
+claim. `report_status.json` must be complete before using the output.
+
+## TSO trade-off curve
+
+The separate `--tso-pareto SWEEP_DIR --output-dir STUDY_DIR` replays a completed
+sweep to add RoCoF, terminal-window diagnostics and metric-specific Pareto
+reports while preserving the source. `--tso-pareto-report STUDY_DIR` regenerates
+reports without integrations. See [PARETO_STUDY.md](PARETO_STUDY.md) for definitions,
+diagnostic thresholds, numerical checks and the immutable-input protocol.
+
+On 15 October the user selected the weighted objective
+`w_f * E[E_f] + E[S_FI]`, with w_f supplied as an input. This is an accepted
+design decision implemented by `--tso-optimize` above. The sweep interface
+below remains available separately; see [TSO_DESIGN.md](TSO_DESIGN.md).
+
+Use the same runner with `--scenario fi_endogenous --tso-sweep --output-dir
+results/tso_tradeoff`. This cannot be combined with `--compare`. The base
+FCR-only case has no eligible FI provider and is rejected for this mode.
+
+The `[tso]` table contains exactly four computational settings:
+
+| Setting | Initial study | Meaning |
+|---|---|---|
+| `gamma_values` | 0, 10, 25, 50, 75, 100, 150, 200, 300 | Distinct finite nonnegative candidates, including zero; common to all eligible FI providers. |
+| `design_samples` | 64 | IID availability realizations for the exploratory curve, at least two. |
+| `validation_samples` | 64 | Independent realizations evaluating the same predeclared candidates, at least two. |
+| `seed` | 20261014 | Root for NumPy SeedSequence children 0 (design) and 1 (validation). In sweep mode `--seed` overrides this root, not `scenario.seed`. |
+
+These settings specify an exploratory computation, not calibrated market
+parameters, a selected optimum, or an actual future delivery draw. Ordinary
+fixed-gamma runs ignore `[tso]`. Sweep mode overrides gamma in the FI response
+parameters for each candidate; rho, delays, awards and membership stay fixed.
+The current `fi_endogenous` preset has one eligible FI provider.
+
+The configured physical scenario supplies the 10 MW event at 1 s, horizon
+0–40 s, output spacing 0.05 s and FI decision interval 0.1 s. Numerical maximum
+step defaults to output spacing unless explicitly configured. Frequency error
+is an ODE-integrated ledger, not a trapezoidal integral of CSV samples. Changing
+only output spacing with a fixed solver maximum step leaves endpoint ledgers
+unchanged. Sampled nadir still depends on output spacing.
+
+Sweep integration uses rtol = 1e-11 and atol = 1e-13. Numerical refinement
+divides both by ten and halves the maximum step. These tighter sweep tolerances
+resolve a near-saturation FCR interpolation overshoot found in the initial
+study; physical response bounds retain the existing 1e-8 MW check tolerance.
+
+Files in the output directory:
+
+- `effective_config.json`, `operating_point.json`, `market.json`: reproducible
+  inputs, cleared awards, original offers and resolved roles;
+- `availability_samples.csv`: all providers' actual study draws by bank/sample;
+- `sample_outcomes.csv`: one row per bank/sample/gamma, checkpointed after each
+  completed candidate, with error, transfers, cost, frequency and saturation;
+- `gamma_summary.csv`: means, standard errors, pointwise Student-t 95% intervals,
+  paired improvements versus zero and the previous gamma, empirical Pareto flags;
+- `numerical_checks.csv`: tighter integration on extreme FI availability draws
+  at zero, the candidate nearest 50, and the upper grid endpoint;
+- `tradeoff.png`: one figure with frequency/expenditure and target saturation;
+- `summary.json`: counts, solver settings, environment and separate preparation,
+  design, validation, refinement and export timings;
+- `run_status.json`: running/complete/failed; a failed or incomplete run is not
+  a valid curve, even if partial checkpoints or older summaries exist.
+
+`target_bound_fraction` counts post-event provider-time at a nonzero symmetric
+target bound, with absolute comparison tolerance 1e-9 MW. `any_target_bound`
+indicates at least one such interval per realization. Zero availability is
+reported separately; delivered power need not equal a saturated held target.
+Confidence intervals concern means, not individual event guarantees, and are
+pointwise rather than simultaneous. No failed realization is silently dropped.
+Reuse a saved effective config with `--tso-sweep` to reproduce a study.
+
 ## Change ordinary experiment parameters
 
 | Goal | Parameters |
@@ -39,7 +296,8 @@ scenarios through the same runner:
 ~~~
 
 `fi_exogenous` assigns the uncertain renewable to FI. `fi_endogenous` lets it
-try the existing FCR offer optimizer and enter FI only on a zero offer.
+try the existing FCR offer optimizer and enter FI on a zero FCR award, whether
+the offer was zero or a positive bid was rejected.
 Both use gamma 50 and rho 1. `fi_strong` uses the same endogenous rule with
 gamma 200. These are illustrative coefficients, not calibrated market prices.
 The base 1 MW minimum makes the uncertain renewable opt out in both endogenous
@@ -48,7 +306,7 @@ cases; lowering the minimum or changing penalties can change that outcome.
 To enable FI directly in a provider's existing `[[providers]]` table, add:
 
 ~~~toml
-participation = "fi"  # or "fcr_or_fi" for the sequential FCR opt-out rule
+participation = "fi"  # or "fcr_or_fi" for FI after a zero FCR award
 fi_gamma_eur_per_hz_mw_s = 50.0
 fi_rho_eur_per_mw2_s = 1.0
 ~~~
@@ -64,7 +322,7 @@ the default zero initial response, no FI action.
 |---|---|
 | Provider `participation = "fcr"` | Default. Existing FCR behavior; zero awards do not enable FI. |
 | Provider `participation = "fi"` | Exogenous FI assignment; zero FCR offer and award. |
-| Provider `participation = "fcr_or_fi"` | FI only if the optimized FCR offer is zero; positive rejected offers stay FCR. |
+| Provider `participation = "fcr_or_fi"` | FI after a zero FCR award, including rejected positive offers; any positive/partial award remains FCR. |
 | Provider `participation = "inactive"` | No controlled response; dispatch and online inertia remain. |
 | Provider `fi_gamma_eur_per_hz_mw_s` | Fixed coefficient in `s = -gamma * sampled_error * delivered_MW`. |
 | Provider `fi_rho_eur_per_mw2_s` | Positive coefficient in activation-cost rate `rho * delivered_MW² / 2`. |
@@ -80,9 +338,13 @@ FI capability is the sampled `A_i`, bounded by the physical symmetric reserve
 cap. There is no FCR minimum bid or bidding safety margin on FI targets.
 
 Assigned FI/inactive providers must have zero prescribed offers and awards in
-fixed modes. `fcr_or_fi` is incompatible with `decision.mode = "fixed"`, since
-a prescribed zero is not a voluntary optimizer result. With optimized offers,
-fixed allocation is allowed subject to the same offer bounds and exclusion.
+fixed modes. `fcr_or_fi` works with optimized or fixed offers and normal or fixed
+allocation: the award determines the role. Prescribed zero offers are not
+labelled voluntary opt-outs; rejected positive offers retain their bid records.
+Roles are determined after clearing and before the draw. Zero availability
+does not move a provider with a positive award into FI. To allow a currently
+FCR-only provider to use the fallback, set `participation = "fcr_or_fi"` and
+specify its gamma and rho explicitly; FI coefficients are not inferred.
 FI never fills the FCR procurement requirement; infeasible clearing still stops
 the run before availability is sampled.
 
@@ -233,6 +495,49 @@ Set `market.requirement_mw = 0.0` with normal clearing for zero awards and
 no FCR delivery. If using fixed allocation, all fixed awards and the fixed
 clearing price must also be zero. The same numerical model still runs.
 
+## TSO sampling stability
+
+Use `--scenario fi_endogenous --tso-stability --frequency-weight 10000
+--output-dir results/tso_stability` with the existing runner. The weight remains
+explicit and the output directory must be empty, so stale complete results
+cannot be confused with an interrupted study. `--seed` and `--compare` are
+incompatible with this mode; edit the explicit seed list instead.
+
+The opt-in `[tso_stability]` computational settings are:
+
+| Key | Initial study | Meaning |
+|---|---|---|
+| `sample_sizes` | `[8, 32, 128]` | Increasing design-bank sizes, nested within each seed |
+| `seeds` | `[20261015, 20261016, 20261017]` | Independent design streams, child 0 |
+| `holdout_samples` | `256` | Common independent assessment size |
+| `holdout_seed` | `20261018` | Separate root seed, child 1 |
+| `reference_gamma` | `52.34375` | Previous N=8 selection, fixed before assessment |
+| `workers` | `3` | Process workers for independent seed jobs and held-out policies |
+
+All nine searches use the existing `[tso_optimizer]` bounds/grid/refinement and
+unchanged simulation tolerances. Its ordinary `design_samples`,
+`validation_samples` and `seed` do not control this study; the table above does.
+Exact gamma/draw outcomes are cached within each seed. An N-sample objective
+always averages its first N draws; caching never substitutes a larger-bank mean.
+The operating point, market and participation are solved once and fixed.
+
+After all searches finish, the union of their selected gammas and the reference
+is frozen in `frozen_candidates.json`. Only then is the holdout drawn and
+assessed. It must not be reused to select/refine gamma. No new delivery event
+or trajectory plot batch is produced. Numerical checks compare ordinary and
+tighter integration at the largest-N selection, using the two extreme design
+FI-capacity draws for each seed. A failure invalidates the study.
+
+Outputs include the protocol/effective configuration, market and operating point,
+design/holdout draws, per-seed cached outcomes and selections, held-out outcomes,
+`selection_summary.csv`, `holdout_summary.csv`, numerical checks, wall/CPU
+timings and one `stability.png`/`.pdf` figure. Generated data stay under `results/`.
+The held-out comparison uses each draw's difference
+`w_f*(E_f(gamma)-E_f(reference)) + S(gamma)-S(reference)` and pointwise Student-t
+95% intervals. These are not simultaneous intervals, equivalence tests or regret
+against the unknown true optimum. Three seeds cannot establish convergence or
+generalize beyond the configured system. No practical-loss tolerance is implied.
+
 ## Parameter comparisons
 
 `--compare` runs the base configuration followed by its `[[comparisons]]`
@@ -337,3 +642,19 @@ $7.2\times10^{-15}$ Hz (CSV round-trip precision).
 
 Keep signs, units, information timing, physical capability and settlement
 assumptions explicit when changing these functions.
+
+## Source-inspired fleet comparison (16 October 2026)
+
+`configs/fleet_scenarios.toml` is an opt-in manifest resolving the existing
+`fi_endogenous` preset. It changes only physical provider fields; the original
+`configs/fcr.toml` numerical baseline is unchanged. See
+[FLEET_STUDY.md](FLEET_STUDY.md) for exact values, source locators, reductions,
+common economics, dispatch checks and reproduction commands.
+
+Use `--tso-fleet --config configs/fleet_scenarios.toml --output-dir
+results/fleet_scenarios`. Each fleet chooses its own common gamma using 32
+availability draws, then evaluates it on 32 independent draws. Draws are matched
+across fleets. The separate `--tso-fleet-report results/fleet_scenarios` mode
+regenerates the five plots and accounting tables from the saved runs. Outputs
+include a frozen resolved plan and per-case timings/numerical checks. FCR block
+payments and FI event settlements are never extrapolated to the same horizon.

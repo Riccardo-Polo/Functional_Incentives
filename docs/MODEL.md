@@ -1,6 +1,31 @@
-# Current FCR–FI model
+# Current frequency-control model
 
-Updated 2026-10-11. This document describes the single current implementation.
+Updated 2026-10-28 (FPP metering and next research direction).
+This document describes the single current physical and market implementation.
+
+The opt-in [AEMO-inspired FPP benchmark](AEMO_FPP.md) extends this implementation
+with prescribed dispatch references, an instantaneous-frequency fixed-droop
+controller replacing only the assigned FI response, and separate four-second
+FPP measurement/settlement. The existing FCR and bilinear laws below are retained.
+FPP eligibility includes every metered unit plus an accounting residual; it does
+not add another physical response. The gamma optimizer remains bilinear-specific.
+Since the 27 October metering revision, FPP meters read P_i,0 plus actual
+delivered response; references are subtracted only in settlement. DT does not
+force schedule tracking or change the physical ODE. See `configs/aemo_fpp_metered.toml`
+for the current first-interval targets and [AEMO_FPP.md](AEMO_FPP.md) for details.
+
+The optional FPP reversal experiment prescribes later signed net-deficit levels
+in the same physical ODE: negative deficit means surplus. A later level replaces
+the previous one; physical states, financial ledgers, provider availability and
+FI clocks continue through each change. The initial single-step experiments are
+unchanged. See `configs/aemo_fpp_reversal.toml` and [AEMO_FPP.md](AEMO_FPP.md).
+
+Frequency-performance reporting includes model RoCoF (`df/dt`, Hz/s), evaluated
+from the same swing-equation RHS at output times with the exact post-disturbance
+right limit retained separately. For multiple events, both exact one-sided limits
+of every event are retained and included in the extrema. This adds diagnostics without changing dynamics
+or the weighted TSO objective. See [PARETO_STUDY.md](PARETO_STUDY.md) for sampled
+extrema, terminal-error definitions and finite-window stationarity checks.
 All scenario changes use [configs/fcr.toml](../configs/fcr.toml) and
 [scripts/run_fcr.py](../scripts/run_fcr.py).
 
@@ -267,8 +292,9 @@ uncertain renewable, rounded to six decimals:
 | Base | [3.945482,3.947217,3.950723,1.699528,0] | [3.945482,3.947217,2.407773,1.699528,0] | 24 |
 | Uncertain variance reduced to 0.04 | [3.945482,3.947217,3.950723,1.699528,1.699528] | [3.945482,3.947217,0.708244,1.699528,1.699528] | 24 |
 
-The discrete baseline was rerun before the update and saved under
-`results/discrete_baseline/`. For base and lower uncertainty, its offers were
+The discrete baseline was rerun before the update. Its original files are now
+inside `results/archive/early_fcr_baselines.zip` under `discrete_baseline/`.
+For base and lower uncertainty, its offers were
 [4,4,4,1,0] and [4,4,4,1,1], and its awards were [4,4,3,1,0] and [4,4,2,1,1].
 Both clearing prices remain unchanged. Positive bid prices remain
 [15,18,24,20,20]; an opted-out renewable records its lower price bound of 10.
@@ -282,8 +308,8 @@ The uncertainty case changes only the uncertain provider's variance. Seed
 20261008 is retained. All old/new pairs have identical availability draws;
 between current cases, reducing variance changes only that provider's draw.
 The physical equations and gains are unchanged. The detailed old/new provider
-comparison is `results/fcr/bidding_update_comparison.csv`; regenerated plots
-and trajectories are under `results/fcr/`.
+comparison is `fcr/bidding_update_comparison.csv` inside the same archive;
+the associated plots and trajectories are stored there under `fcr/`.
 
 The preceding FCR update passed 46 tests, including continuous optimality, min/max/zero boundary
 cases, safety margin validation, fixed modes, scenario precedence, provider
@@ -301,20 +327,25 @@ The user fixes each provider's participation policy before the episode:
 |---|---|---|
 | `fcr` (default) | Existing optimized or prescribed offer | FCR, even with a zero award |
 | `fi` | Forced zero | FI, assigned exogenously |
-| `fcr_or_fi` | Existing optimized offer | FI only if the chosen offer is zero; otherwise FCR |
+| `fcr_or_fi` | Existing optimized or prescribed offer | FI if the FCR award is zero; otherwise FCR |
 | `inactive` | Forced zero | No controlled response |
 
-The realized sets $\mathcal F$ and $\mathcal I$ are disjoint and fixed during
-the event. Positive offers rejected by the auction remain in $\mathcal F$ with
-zero response capability. Explicit FI and inactive providers cannot receive
-positive fixed FCR offers or awards. `fcr_or_fi` requires optimized offers;
-a prescribed zero offer is not evidence of an economic opt-out.
+The realized sets $\mathcal F$ and $\mathcal I$ are disjoint and fixed after
+feasible clearing, before availability is sampled. A `fcr_or_fi` provider with
+a positive offer but zero award now enters FI, as does a zero-offer provider.
+Any strictly positive award, including a partial award, keeps it exclusively
+in FCR even if realized availability is zero. An explicitly FCR-only provider
+does not enter FI. Explicit FI and inactive providers cannot receive positive
+FCR offers or awards. These rules also apply to prescribed offers/allocations.
 
-The endogenous rule is a **sequential FCR opt-out rule**, not a joint comparison
-of expected FCR and FI profit. It preserves the existing private offer reward,
-including its lack of acceptance prediction and its minimum-bid dependence.
-Once a provider opts out, it becomes an FI participant without an additional
-enrollment optimization. The simulator does not switch roles during an event.
+This is a **sequential FCR-first, zero-award fallback rule**, not a joint
+comparison of expected FCR and FI profit. It preserves the private FCR offer
+reward, including its lack of acceptance prediction and minimum-bid dependence.
+The original offer remains in market records: a rejected positive bid is
+distinct from an optimized voluntary zero offer or a prescribed zero offer.
+There is no additional FI enrollment optimization or switching during an event.
+This 14 October change supersedes the original exclusion of rejected bidders
+in D-015; see D-018 in the local decision log.
 
 Only FCR awards satisfy $Q_{\mathrm{req}}$. FI cannot rescue an infeasible
 capacity auction. Availability is drawn once after feasible clearing for every
@@ -329,8 +360,9 @@ margin limits FCR offers only. No shared reserve or double payment is allowed.
 
 ## 8. Fixed incentive and provider optimization
 
-The TSO/user announces constant $\gamma_i\ge0$ before the run. There is **no
-TSO outer optimization or automatic tuning**. FI decisions share a configurable
+The TSO/user announces constant $\gamma_i\ge0$ before the run. Ordinary mode
+uses manual coefficients; `--tso-optimize` selects one common gamma after
+clearing and before actual availability/delivery. FI decisions share a configurable
 clock $t_k=k\Delta$ starting at zero, with $t_{K}=H$ and a shortened last
 interval if necessary. Let $h_k=t_{k+1}-t_k$ and $e_k=\Delta f(t_k)$.
 
@@ -472,6 +504,81 @@ or monotonic improvement with gamma. The initial model has no measurement
 noise, energy/SoC limit, separate ramp constraint, future-income objective,
 time-varying availability, secondary restoration, or exit during an interval.
 
+### Research note: payment/cost ratio after the Week 5 meeting
+
+The user reports that the supervisor identified the near-2:1 net-payment/cost
+relation in slide 21/22 as related to their own theoretical work, and requested
+scenario tests and a saturation boundary. The exact scope of that external
+result remains to be supplied. [NEXT_STEPS.md](NEXT_STEPS.md) records the
+observations and proposed validation; this note adds no modelling assumption.
+
+For the **instantaneous interior** best response, write p = -gamma*e.
+Maximizing `p*z - rho*z²/2` gives `p = rho*z`, hence payment rate
+`p*z = rho*z² = 2*cost_rate`. Integrated over a trajectory satisfying that
+pointwise condition, net settlement S = 2C and profit S - C = C.
+
+The current decision instead controls a held target through lag. Using the
+moments from Section 8, let z_0 be the inherited response, v the selected target,
+and g the derivative of predicted interval profit with respect to v:
+
+$$
+g=pI_b-\rho(z_0I_{ab}+vI_{bb}),\qquad
+\widehat S-2\widehat C
+=z_0\left[pI_a-\rho(z_0I_{aa}+vI_{ab})\right]+v g.
+$$
+
+This is an algebraic identity derived from the implemented prediction formulas,
+not an additional contract. An interior optimum has g = 0, but its inherited
+response term need not vanish. With an active target bound, the v*g term can
+also contribute. Actual interval ledgers agree with these predictions to
+integration tolerance under the model's assumed dynamics. Therefore neither
+absence of target clipping nor an approximately doubled cumulative payment
+alone establishes an exact identity for this sampled dynamic controller.
+
+Study interval and cumulative S - 2C, and S/C only for non-negligible C.
+Distinguish saturation of the commanded target from delivered power approaching
+the bound. Keep decision-clock sensitivity separate from numerical refinement;
+do not change accounting or the optimizer to force S = 2C.
+
+## TSO trade-off measurements
+
+The opt-in common-gamma sweep freezes a feasible cleared FCR market and resolved
+roles, then draws two independent IID availability banks from the same bounded
+laws used in bidding and ordinary delivery. Every candidate within a bank sees
+the same samples. No actual future delivery realization informs a choice.
+
+For each candidate, the full coupled system and existing FI optimizer run again.
+An extra numerical ledger integrates `dE_f/dt = delta_f(t)^2`, initialized at zero,
+over the complete configured event horizon. This ledger has no feedback into
+the physical states or provider decisions. Actual FI net transfers, gross
+rewards/charges and activation costs retain their definitions above. Numerical
+integration also splits at analytically known FI response zero crossings to
+resolve gross-ledger derivative kinks; these are not new decision times.
+
+The reported curve compares mean E_f [Hz² s] with mean net FI transfer
+[EUR/event]. FCR block payments are constant across candidates and stay separate.
+Statistics include paired changes and pointwise Student-t uncertainty intervals
+for means, plus empirical Pareto flags among tested candidates. No weight,
+budget, optimum, operational frequency constraint or renewed contract is imposed.
+See [TSO_DESIGN.md](TSO_DESIGN.md) and [CONFIGURATION.md](CONFIGURATION.md#tso-trade-off-curve).
+
+## Weighted TSO optimization
+
+The separate opt-in optimizer minimizes the sample mean of
+`J_j(gamma) = w_f * E_f_j(gamma) + S_FI_j(gamma)` on a fixed design bank,
+with explicit positive w_f in EUR/(Hz² s) and bounded common gamma. It reuses
+the same coupled dynamics, provider decision law and actual payment ledger.
+It freezes the FCR market/roles; FCR block payments are independent of gamma.
+There is no added activation-cost term, budget, risk measure or frequency limit.
+
+The bounded grid and local midpoint refinement report the best tested candidate,
+not a certified global optimum. Independent validation evaluates only the
+selected gamma; a third stream is drawn afterwards for one delivery event.
+Statistics compose J per draw, preserving error/payment covariance. Tighter
+integration checks retain the same design draws and provider decision clock.
+No future delivery realization informs the TSO choice. Gamma remains constant
+over H, and repeated contracts remain a separate unimplemented extension.
+
 ## Sources and scope
 
 Local primary references are `references/PSDCO_Script_2026 (1).pdf`,
@@ -481,5 +588,20 @@ The implemented inertia omits a separate rotating-load inertia term.
 Local accepted decisions and current context are in `local_context/`.
 
 The implemented FI is the fixed-gamma bilinear contract above. A separate
-performance/Lyapunov formula, optimized TSO design, secondary control and detailed
+performance/Lyapunov formula, secondary control and detailed
 network validation remain future work.
+
+The approved post-meeting directions also include source-informed parameters
+and repeated market cycles; see [NEXT_STEPS.md](NEXT_STEPS.md). Their precise
+new assumptions are not yet part of the implemented model. The
+[parameter evidence register](PARAMETER_SOURCES.md) defines the provenance work
+needed before replacing the current pedagogical inputs.
+The accepted TSO objective (D-022, 15 October) is
+`w_f * E[E_f] + E[S_FI]`, with w_f an explicit user input in EUR/(Hz² s).
+Its error/expenditure measurements and common-gamma optimization are implemented.
+See [TSO_DESIGN.md](TSO_DESIGN.md). No numerical w_f is
+chosen implicitly, and no budget/frequency requirement replaces this objective.
+
+The next requested task is FPP provider optimization. It has no adopted
+objective, prices or controller law yet; the existing FPP follower remains a
+fixed benchmark. See [AEMO_FPP.md](AEMO_FPP.md#next-research-step-fpp-provider-optimization).

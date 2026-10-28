@@ -1,11 +1,54 @@
 # Functional Incentives for Frequency Control
 
-ETH Zürich semester project. The current implementation covers **provider
-decisions, the FCR capacity market, functional incentives (FI), and coupled
-frequency dynamics**. The TSO incentive strength is fixed by the user;
-FI providers optimize their own commands at each decision time.
+ETH Zürich semester project. The implementation covers **provider decisions,
+the FCR capacity market, functional incentives (FI), and coupled frequency
+dynamics**. FI providers optimize their own commands at each decision time.
+Opt-in studies evaluate a common-gamma sweep, the weighted TSO objective
+`w_f * E[E_f] + E[S_FI]`, sampling stability, fleet and FCR-procurement changes,
+and metric-specific Pareto diagnostics. A separate AEMO-inspired benchmark
+compares fixed FCR, FI and FPP policies on matched draws.
+
+The [post-Week-5 work plan](docs/NEXT_STEPS.md) records the supervisor feedback,
+the FI payment/cost and saturation study, parameter calibration, and the staged
+path to repeated market cycles. The
+[parameter evidence register](docs/PARAMETER_SOURCES.md) separates sourced
+inputs from the current pedagogical assumptions. Calibration and repeated market
+cycles remain planned extensions; [TSO_DESIGN.md](docs/TSO_DESIGN.md) records the
+implemented objective, search method and limits of the numerical conclusions.
+The next research task is **FPP provider optimization**; its objective,
+information timing and economic inputs are open. See
+[AEMO_FPP.md](docs/AEMO_FPP.md#next-research-step-fpp-provider-optimization).
+
+**Repository language:** all project-authored code, comments, configuration labels,
+documentation, local notes, reports, figures and filenames must remain in English.
+This also applies to ignored project outputs. Original third-party sources and
+proper names retain their original wording; conversation language may follow the user.
 
 ## Run
+
+The [AEMO-inspired FPP benchmark](docs/AEMO_FPP.md) compares FCR alone,
+bilinear FI at gamma=50 and fixed-droop FPP over matched 300-second events.
+The current metered study uses `--fpp-benchmark --config
+configs/aemo_fpp_metered.toml --output-dir results/aemo_fpp_metered`.
+Meters read actual delivered power; a prescribed balanced dispatch ramp is a
+settlement reference only. The study includes auditable directional settlement,
+RoCoF, numerical checks, eight matched assessment draws and an independent
+delivery. It reports FPP repricing coefficients in MW h because external prices
+are absent. Use `--fpp-report results/aemo_fpp_metered` for report regeneration.
+The earlier constant-reference study and the separate deficit-to-surplus trial
+remain available in their original result directories.
+
+The [Pareto study](docs/PARETO_STUDY.md) extends a completed common-gamma sweep
+with cost versus nadir, terminal error, integrated error and RoCoF, plus tail
+and saturation diagnostics. Use `--tso-pareto results/tso_tradeoff --output-dir
+results/tso_pareto`; the original study is preserved. Subsequent
+`--tso-pareto-report results/tso_pareto` regenerates figures without simulations.
+
+The [FCR requirement study](docs/FCR_REQUIREMENT_STUDY.md) compares 12, 10 and
+8 MW procurement within each preserved A/B/C fleet, changing no other inputs.
+Use `--tso-procurement --config configs/fcr_requirement.toml --output-dir results/fcr_requirement`,
+then `--tso-procurement-report results/fcr_requirement`. Previous runs are
+referenced in place; FCR block payments and FI event payments remain separate.
 
 Python 3.11+ is required. From the repository root in PowerShell:
 
@@ -26,15 +69,61 @@ and two renewable generators on the PJM 5-bus network.
 # One named scenario
 .\.venv\Scripts\python.exe scripts\run_fcr.py --scenario lower_uncertainty --output-dir results\lower_uncertainty
 
-# FI for providers who voluntarily opt out of FCR
+# FI for eligible providers with zero FCR award (opt-out or rejected bid)
 .\.venv\Scripts\python.exe scripts\run_fcr.py --scenario fi_endogenous --output-dir results\fi_endogenous
 
 # Different parameters, seed or destination
 .\.venv\Scripts\python.exe scripts\run_fcr.py --config configs\fcr.toml --seed 123 --output-dir results\my_run
 
+# Common-gamma curve with independent design/validation availability banks
+.\.venv\Scripts\python.exe scripts\run_fcr.py --scenario fi_endogenous --tso-sweep --output-dir results\tso_tradeoff
+
+# Weighted TSO optimization; 10000 is a demonstration weight, not calibrated
+.\.venv\Scripts\python.exe scripts\run_fcr.py --scenario fi_endogenous --tso-optimize --frequency-weight 10000 --output-dir results\tso_optimization
+
+# Sampling stability: nested banks, three seeds, then a common independent holdout
+.\.venv\Scripts\python.exe scripts\run_fcr.py --scenario fi_endogenous --tso-stability --frequency-weight 10000 --output-dir results\tso_stability
+
 # Current test suite
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ~~~
+
+The sweep uses `[tso]` computational settings in the same configuration. It
+freezes the cleared market, reuses each bank across gamma values, and saves one
+trade-off figure, sample outcomes, mean/paired statistics, numerical checks and
+wall times under the chosen ignored `results/` directory. No frequency weight
+or budget is assigned automatically. See [configuration details](docs/CONFIGURATION.md#tso-trade-off-curve).
+
+Optimization uses `[tso_optimizer]`: initially 8 design and 8 validation draws,
+gamma in [0, 300], a coarse grid and refinement around observed minima. Only
+design draws select gamma. The chosen gamma is validated, checked with tighter
+numerics and applied to one fresh delivery draw. Weight is mandatory on the CLI
+or in the configuration. Outputs include weighted uncertainty, boundary/search
+status, wall and CPU times; no figure batch is generated. These small sample
+counts verify the workflow, not statistical precision or a universal policy.
+See [optimizer configuration](docs/CONFIGURATION.md#weighted-tso-optimization).
+
+To compare different user weights, run the optimizer with the same effective
+config/seed and a different `--frequency-weight`, then pass the completed run
+directories to `--tso-report`. It checks that all other inputs and draws match,
+adds gamma-zero references on the saved validation/delivery draws, and exports
+four Week-5-style PNG/PDF figures plus separate validation statistics. Existing
+run directories are referenced, not copied. See
+[weight comparisons](docs/CONFIGURATION.md#comparing-tso-weights).
+
+`--tso-stability` repeats the same gamma search on increasing nested design banks
+and several seeds, using `[tso_stability]`. After every candidate is fixed, it
+assesses them on a common independent bank and reports paired objective
+differences against a predeclared reference gamma. This separates variability
+of the selected gamma from changes in performance. It does not choose a new
+policy on the holdout. See [sampling stability](docs/CONFIGURATION.md#tso-sampling-stability).
+
+The completed initial study at w_f=10000 selected 46.875/46.875/45.3125 across
+three seeds with N=128, compared with 52.34375/49.21875/42.1875 at N=8.
+On 256 independent common draws, gamma=46.875 improves mean J by only
+0.7167 EUR/event (0.2066%) over the earlier 52.34375. This is a conditional
+sampling diagnostic, not a calibrated policy. Seven targeted tests passed;
+the report and one PNG/PDF figure pair are under `results/tso_stability/`.
 
 ## Experiment with the simulation
 
@@ -134,17 +223,26 @@ fi_rho_eur_per_mw2_s = 1.0
 ~~~
 
 Use `"fi"` for an exogenous assignment, `"fcr"` for the default FCR-only policy,
-or `"inactive"` for zero controlled response. A positive FCR bid rejected by the
-auction **never enables FI**. `fcr_or_fi` requires optimized bids and implements
-sequential FCR opt-out; it does not compare expected profits from both products.
+or `"inactive"` for zero controlled response. With `"fcr_or_fi"`, a **zero FCR
+award enables FI**, including after a rejected positive bid. A positive award,
+even partial, keeps the provider exclusively in FCR. Roles are fixed after
+clearing, before availability is drawn; fixed offers/awards obey the same rule.
+The rejected offer remains recorded. This FCR-first fallback does not compare
+expected profits from both products.
 FI capability is the provider's realized availability, and FI power does not
 count toward contracted FCR procurement.
+
+[TSO_DESIGN.md](docs/TSO_DESIGN.md) documents the accepted selection of common
+gamma from frequency performance and actual FI expenditure. The trade-off
+evaluator and bounded optimizer are implemented through `--tso-sweep` and
+`--tso-optimize`; the weighted objective takes an explicit user-supplied `w_f`.
+Its demonstration weight does not calibrate a real policy.
 
 The provider observes sampled frequency error `e_k` and its current delivered
 power, then chooses a target maximizing predicted payment minus activation cost
 over the next decision interval. Its first-order dynamics determine actual
 power `z(t)`. Settlement integrates `-gamma * e_k * z(t)` over time; it can
-reward or charge the provider. Gamma is never optimized or retuned.
+reward or charge the provider. Gamma is held fixed within each simulated event.
 
 Inspect `provider_responses.png` for command versus delivery and
 `fi_financials.png` for the corresponding money. In `fi_outcomes.csv`:
@@ -293,6 +391,31 @@ figure. Reusing a destination replaces its generated files.
 
 Generated results are ignored by Git.
 
+## Source-inspired fleet comparison
+
+The fleet comparison uses the same solver and optimizer:
+
+```powershell
+.venv/Scripts/python.exe scripts/run_fcr.py --tso-fleet --config configs/fleet_scenarios.toml --output-dir results/fleet_scenarios
+.venv/Scripts/python.exe scripts/run_fcr.py --tso-fleet-report results/fleet_scenarios
+```
+
+Three mixed thermal/PV fleets, common economics and w_f=10000, 32 design
+and 32 independent validation draws per fleet. Five figures show frequency,
+all provider responses, FI targets/availability, FI finances and TSO spending.
+FCR is per four-hour block; FI is per 40-second event. See
+[individual machine parameters](docs/FLEET_STUDY.md#individual-machine-parameters),
+including common availability/economic inputs and source provenance.
+Completed cases can be reused only with an identical frozen plan; report-only
+mode does not repeat optimization. Partial or conflicting runs are preserved
+and rejected rather than overwritten.
+
+Completed A/B/C results: gamma 33.59375 / 40.625 / 33.59375; independent
+validation mean nadirs 59.91528 / 59.90226 / 59.86921 Hz and mean FI payments
+37.16 / 63.97 / 67.17 EUR/event. FCR capacity costs 288 EUR/block in each.
+Seven targeted tests and six numerical refinement checks passed; final
+verification on 17 October. The full report is `results/fleet_scenarios/ANALYSIS.md`.
+
 ## Code map
 
 The package has one module per responsibility; there are no stage-specific
@@ -308,18 +431,34 @@ implementations or empty incentive packages.
 | `market.py` | Clearing, explicit fixed allocation and settlement |
 | `frequency.py` | Frequency equation and analytical no-FCR reference |
 | `simulation.py` | Block sequencing and coupled numerical dynamics |
-| `metrics.py` | Bounds, analytical agreement and solver refinement |
-| `plotting.py` | Trajectory and parameter-comparison figures |
+| `tso.py` | Common-gamma evaluation/search, independent validation and delivery |
+| `fleet.py` | Controlled physical comparisons and saved-result reports, reusing the existing optimizer |
+| `procurement.py` | FCR-requirement comparisons on the preserved fleets |
+| `pareto.py` | Matched gamma replay and metric-specific Pareto diagnostics |
+| `fpp.py` | Fixed FPP control, metering, filtering and settlement |
+| `fpp_study.py` | Matched FCR/FI/FPP benchmark and saved-result reports |
+| `metrics.py` | Numerical checks and event/Monte Carlo statistics |
+| `plotting.py` | Trajectory, comparison and trade-off figures |
 | `experiment.py` | Configuration, orchestration, output and command line |
 
 There are five focused test files covering decisions, market, dynamics,
-operating points and the complete experiment. **All 58 tests pass**, including
-FI optimality, signed settlement, delayed delivery, separate clocks and participation
-exclusivity. All five configured scenarios were run under `results/fcr_fi/`.
+operating points and the complete experiment. The full suite passed **107 tests**
+on 28 October 2026 after the repository audit. The metered
+study has 33 integrations including three numerical refinements and saves
+physical, settlement and source-preservation checks under
+`results/aemo_fpp_metered/`. The Week 7 Beamer source, compiled PDF and audit
+are under `results/week7/`; generated results are ignored by Git.
 With the default seed, gamma 50 improves the sampled nadir from 59.919129 to
 59.948176 Hz and yields FI net settlement of EUR 61.4103 and profit of EUR 30.7072
 over 40 seconds. FCR awards and its 24 EUR/MW/block price stay the same.
 These are single-event illustrative outcomes, not a general policy result.
+The 15 October weighted optimizer passed **44 dynamics/experiment tests**.
+One five-provider run with w_f=10000 selected gamma=52.34375 on eight design
+draws, assessed it on eight independent validation draws and simulated one
+fresh delivery event. It took 82.46 s wall / 71.17 s CPU (163 ODE runs including
+two numerical checks). These are conditional demonstration results; the
+improvement over gamma 50 in design J was only EUR 0.1623, so the refined
+decimal value is not evidence of a statistically distinct policy.
 
 Local research PDFs in `references/`
 and notes in `local_context/` are intentionally outside Git. Consult

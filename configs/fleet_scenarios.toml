@@ -1,0 +1,41 @@
+# Controlled physical comparison. Sources and reductions: docs/FLEET_STUDY.md.
+# Resolve the existing FI preset; economics/availability remain identical.
+base_config = "fcr.toml"
+base_scenario = "fi_endogenous"
+workers = 3
+
+[optimizer]
+frequency_weight_eur_per_hz2_s = 10000.0
+design_samples = 32
+validation_samples = 32
+seed = 20261019
+
+[[cases]]
+name = "thermal_heavy"
+label = "A: conventional-heavy fleet"
+[cases.providers]
+conventional_1 = { rating_mva = 400.0, power_setpoint_mw = 280.0, inertia_s = 6.0, minimum_power_mw = 144.0, maximum_power_mw = 360.0, time_constant_s = 3.4 }
+conventional_2 = { rating_mva = 400.0, power_setpoint_mw = 280.0, inertia_s = 5.0, minimum_power_mw = 144.0, maximum_power_mw = 360.0, time_constant_s = 4.8 }
+conventional_3 = { rating_mva = 300.0, power_setpoint_mw = 260.0, inertia_s = 4.0, minimum_power_mw = 108.0, maximum_power_mw = 270.0, time_constant_s = 6.2 }
+renewable_reliable = { rating_mva = 160.0, power_setpoint_mw = 90.0, minimum_power_mw = 0.0, maximum_power_mw = 150.0, time_constant_s = 1.6 }
+renewable_uncertain = { rating_mva = 160.0, power_setpoint_mw = 90.0, minimum_power_mw = 0.0, maximum_power_mw = 150.0, time_constant_s = 2.0 }
+
+[[cases]]
+name = "solar_heavy"
+label = "B: higher photovoltaic share"
+[cases.providers]
+conventional_1 = { rating_mva = 200.0, power_setpoint_mw = 140.0, inertia_s = 6.0, minimum_power_mw = 72.0, maximum_power_mw = 180.0, time_constant_s = 3.4 }
+conventional_2 = { rating_mva = 300.0, power_setpoint_mw = 190.0, inertia_s = 5.0, minimum_power_mw = 108.0, maximum_power_mw = 270.0, time_constant_s = 4.8 }
+conventional_3 = { rating_mva = 300.0, power_setpoint_mw = 190.0, inertia_s = 4.0, minimum_power_mw = 108.0, maximum_power_mw = 270.0, time_constant_s = 6.2 }
+renewable_reliable = { rating_mva = 320.0, power_setpoint_mw = 240.0, minimum_power_mw = 0.0, maximum_power_mw = 300.0, time_constant_s = 0.8 }
+renewable_uncertain = { rating_mva = 320.0, power_setpoint_mw = 240.0, minimum_power_mw = 0.0, maximum_power_mw = 300.0, time_constant_s = 1.0 }
+
+[[cases]]
+name = "solar_slow"
+label = "C: higher PV share, slower responses"
+[cases.providers]
+conventional_1 = { rating_mva = 200.0, power_setpoint_mw = 140.0, inertia_s = 6.0, minimum_power_mw = 72.0, maximum_power_mw = 180.0, time_constant_s = 5.5 }
+conventional_2 = { rating_mva = 300.0, power_setpoint_mw = 190.0, inertia_s = 5.0, minimum_power_mw = 108.0, maximum_power_mw = 270.0, time_constant_s = 6.9 }
+conventional_3 = { rating_mva = 300.0, power_setpoint_mw = 190.0, inertia_s = 4.0, minimum_power_mw = 108.0, maximum_power_mw = 270.0, time_constant_s = 8.3 }
+renewable_reliable = { rating_mva = 320.0, power_setpoint_mw = 240.0, minimum_power_mw = 0.0, maximum_power_mw = 300.0, time_constant_s = 1.6 }
+renewable_uncertain = { rating_mva = 320.0, power_setpoint_mw = 240.0, minimum_power_mw = 0.0, maximum_power_mw = 300.0, time_constant_s = 2.0 }

@@ -1,0 +1,4 @@
+# Controlled reduction from the saved 12 MW A/B/C study. No other inputs change.
+baseline_study = "../results/fleet_scenarios"
+requirements_mw = [10.0, 8.0]
+workers = 3

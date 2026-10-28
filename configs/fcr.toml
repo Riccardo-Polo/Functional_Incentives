@@ -35,6 +35,37 @@ decision_interval_s = 0.1  # independent of solver/output step; shortened last i
 # Per-provider participation defaults to "fcr". FI scenarios below override it.
 # gamma [EUR/(Hz MW s)] is fixed user input; rho [EUR/(MW^2 s)] must be positive.
 
+[tso]
+# Opt-in exploratory curve: --scenario fi_endogenous --tso-sweep.
+# Computational settings, not a calibrated policy or a chosen optimal gamma.
+gamma_values = [0, 10, 25, 50, 75, 100, 150, 200, 300]
+design_samples = 64
+validation_samples = 64
+seed = 20261014  # SeedSequence children 0/1; independent of the delivery seed
+
+[tso_optimizer]
+# Opt-in: --scenario fi_endogenous --tso-optimize --frequency-weight VALUE.
+# Small initial computation, not a statistical precision guarantee.
+# No default frequency weight: provide it on the CLI or explicitly in this table
+# as frequency_weight_eur_per_hz2_s. CLI takes precedence.
+gamma_max = 300.0  # computational search bound, not a theoretical policy limit
+grid_points = 7
+gamma_tolerance = 1.0  # spacing next to observed local minima, not global accuracy
+max_refinement_rounds = 8
+design_samples = 8
+validation_samples = 8
+seed = 20261015  # fresh streams: design=0, validation=1, later delivery=2
+
+[tso_stability]
+# Opt-in: --scenario fi_endogenous --tso-stability --frequency-weight 10000.
+# Computational replication only; does not change the ordinary optimizer preset.
+sample_sizes = [8, 32, 128]  # nested prefixes of each seed's design stream 0
+seeds = [20261015, 20261016, 20261017]
+holdout_samples = 256
+holdout_seed = 20261018  # independent stream 1, assessed after candidates freeze
+reference_gamma = 52.34375  # previous N=8 result, fixed before this assessment
+workers = 3
+
 [[providers]]
 provider_id = "conventional_1"
 generator_id = "conventional_1"

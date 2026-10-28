@@ -101,6 +101,28 @@ def symmetric_reserve_capacity_mw(
 
 
 @dataclass(frozen=True)
+class FPPProviderParameters(FCRProviderParameters):
+    """Fixed-gain causal benchmark controller; no FPP price enters its law.
+
+    reserve_mw is actual availability, not an FCR award. The source absolute
+    +/-0.015 Hz deadband is retained around 60 Hz as an explicit adaptation.
+    Inheriting physical lag/bound validation does not assign an FCR market role.
+    """
+
+    rho_eur_per_mw2_s: float
+
+    def __post_init__(self):
+        super().__post_init__()
+        if not isfinite(self.rho_eur_per_mw2_s) or self.rho_eur_per_mw2_s <= 0:
+            raise ValueError("FPP activation cost requires the existing positive FI rho")
+
+    def requested_response_mw(self, delta_frequency_hz):
+        error = np.asarray(delta_frequency_hz)
+        deadband_error = np.sign(error) * np.maximum(abs(error) - 0.015, 0.)
+        return np.clip(-self.gain_mw_per_hz * deadband_error, -self.reserve_mw, self.reserve_mw)
+
+
+@dataclass(frozen=True)
 class QuadraticCommitmentCost:
     """C(q) = a*q + beta*q**2/2, in EUR for one entire delivery block."""
 
