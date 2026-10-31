@@ -945,9 +945,11 @@ def main() -> None:
     parser.add_argument("--seed", type=int, help="override the availability seed")
     tso_mode = parser.add_mutually_exclusive_group()
     tso_mode.add_argument("--fpp-benchmark", action="store_true",
-                         help="fixed FCR/FI/FPP comparison using an FPP overlay as --config")
+                         help="compare FCR/FI/FPP using the gain game configured in the FPP overlay")
     tso_mode.add_argument("--fpp-report", type=Path, metavar="STUDY_DIR",
                          help="regenerate the saved FPP comparison without integration")
+    tso_mode.add_argument("--fpp-compare-controllers", type=Path, metavar="GAIN_STUDY",
+                         help="compare previous, sampled unit and frozen FPP gains on two matched delivery paths")
     tso_mode.add_argument("--tso-sweep", action="store_true", help="estimate the common-gamma trade-off using [tso]")
     tso_mode.add_argument("--tso-pareto", type=Path, metavar="SWEEP_DIR",
                          help="replay a completed sweep to add RoCoF, tail diagnostics and Pareto reports")
@@ -967,6 +969,14 @@ def main() -> None:
     selection.add_argument("--compare", action="store_true", help="run base and all configured comparisons")
     selection.add_argument("--scenario", help="run one named comparison, or base")
     arguments = parser.parse_args()
+    if arguments.fpp_compare_controllers:
+        if (arguments.compare or arguments.scenario or arguments.seed is not None or
+                arguments.frequency_weight is not None or arguments.config != DEFAULT_CONFIG_PATH or
+                arguments.output_dir == DEFAULT_OUTPUT_DIRECTORY):
+            parser.error("--fpp-compare-controllers requires a completed gain study and explicit --output-dir")
+        from .fpp_comparison import run_controller_comparison
+        run_controller_comparison(arguments.fpp_compare_controllers, arguments.output_dir)
+        return
     if arguments.fpp_benchmark or arguments.fpp_report:
         if arguments.compare or arguments.scenario or arguments.seed is not None or arguments.frequency_weight is not None:
             parser.error("FPP modes use their fixed overlay; do not supply scenario/seed/weight/compare overrides")

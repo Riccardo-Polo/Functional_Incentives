@@ -15,8 +15,9 @@ path to repeated market cycles. The
 inputs from the current pedagogical assumptions. Calibration and repeated market
 cycles remain planned extensions; [TSO_DESIGN.md](docs/TSO_DESIGN.md) records the
 implemented objective, search method and limits of the numerical conclusions.
-The next research task is **FPP provider optimization**; its objective,
-information timing and economic inputs are open. See
+The next research task is **FPP provider optimization**, focusing on zero-sum
+redistribution and a possible tractable Nash equilibrium; its objective,
+information timing and economic inputs remain open. See
 [AEMO_FPP.md](docs/AEMO_FPP.md#next-research-step-fpp-provider-optimization).
 
 **Repository language:** all project-authored code, comments, configuration labels,
@@ -26,17 +27,22 @@ proper names retain their original wording; conversation language may follow the
 
 ## Run
 
-The [AEMO-inspired FPP benchmark](docs/AEMO_FPP.md) compares FCR alone,
-bilinear FI at gamma=50 and fixed-droop FPP over matched 300-second events.
-The current metered study uses `--fpp-benchmark --config
-configs/aemo_fpp_metered.toml --output-dir results/aemo_fpp_metered`.
-Meters read actual delivered power; a prescribed balanced dispatch ramp is a
-settlement reference only. The study includes auditable directional settlement,
-RoCoF, numerical checks, eight matched assessment draws and an independent
-delivery. It reports FPP repricing coefficients in MW h because external prices
-are absent. Use `--fpp-report results/aemo_fpp_metered` for report regeneration.
-The earlier constant-reference study and the separate deficit-to-surplus trial
-remain available in their original result directories.
+The [FPP follower study](docs/AEMO_FPP.md) compares FCR alone, bilinear FI and
+two renewable FPP followers. It evaluates the complete gain catalogue on matched
+disturbance and availability draws, then checks the frozen equilibrium on an
+independent holdout. During delivery each gain stays fixed and each target is
+recomputed from measured frequency every 0.1 s. Use a fresh output directory.
+
+```powershell
+.\.venv\Scripts\python.exe scripts/run_fcr.py --fpp-benchmark --config configs/aemo_fpp_metered.toml --output-dir results/fpp_gain_game
+```
+
+The study scores actual power deviations from the solved ANDES reference using
+the sum of raise and lower FPP coefficients in MW h. Numerical studies from
+earlier fixed-droop experiments can be read with `--fpp-report STUDY_DIR`.
+Use `--fpp-compare-controllers results/fpp_gain_game --output-dir results/fpp_controller_comparison`
+to evaluate the previous continuous follower and the selected gains on two paired
+paths under identical ideal-frequency settlement.
 
 The [Pareto study](docs/PARETO_STUDY.md) extends a completed common-gamma sweep
 with cost versus nadir, terminal error, integrated error and RoCoF, plus tail
@@ -435,18 +441,21 @@ implementations or empty incentive packages.
 | `fleet.py` | Controlled physical comparisons and saved-result reports, reusing the existing optimizer |
 | `procurement.py` | FCR-requirement comparisons on the preserved fleets |
 | `pareto.py` | Matched gamma replay and metric-specific Pareto diagnostics |
-| `fpp.py` | Fixed FPP control, metering, filtering and settlement |
+| `fpp.py` | FPP measurement profiles and signed settlement |
+| `fpp_game.py` | Common scenario banks, payoff tables and finite-game equilibria |
+| `fpp_comparison.py` | Paired controller deliveries with one settlement profile and frozen gains |
 | `fpp_study.py` | Matched FCR/FI/FPP benchmark and saved-result reports |
 | `metrics.py` | Numerical checks and event/Monte Carlo statistics |
 | `plotting.py` | Trajectory, comparison and trade-off figures |
 | `experiment.py` | Configuration, orchestration, output and command line |
 
 There are five focused test files covering decisions, market, dynamics,
-operating points and the complete experiment. The full suite passed **107 tests**
-on 28 October 2026 after the repository audit. The metered
-study has 33 integrations including three numerical refinements and saves
-physical, settlement and source-preservation checks under
-`results/aemo_fpp_metered/`. The Week 7 Beamer source, compiled PDF and audit
+operating points and the complete experiment. The full suite passed **108 tests**
+on 29 October 2026 after the constant-reference revision. That historical study has
+30 integrations including three numerical refinements and saves physical,
+reference-identity and settlement checks under `results/aemo_fpp_constant/`.
+All 27 matched physical trajectories are unchanged, and the audit preserves
+530 historical files. The Week 7 Beamer source, compiled PDF and audit
 are under `results/week7/`; generated results are ignored by Git.
 With the default seed, gamma 50 improves the sampled nadir from 59.919129 to
 59.948176 Hz and yields FI net settlement of EUR 61.4103 and profit of EUR 30.7072

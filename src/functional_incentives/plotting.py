@@ -14,10 +14,87 @@ from .frequency import FrequencyTrajectory
 from .simulation import AggregateFCRTrajectory
 
 
-def plot_fpp_comparison(output_dir: Path, metrics, summary, accounts, schedule="constant"):
+def plot_fpp_controller_comparison(output, source, players, gains):
+    from .fpp_comparison import CASES, CONTROLLERS
+    labels = ["Previous continuous droop", "Sampled unit gain", "Selected gains"]
+    colors = ["#394a59", "#34827c", "#b34129"]
+    styles = ["-", "--", "-"]
+    names = ["Sustained deficit", "Deficit to surplus"]
+    traces = {(case,c): pd.read_csv(output / case / c / "trajectory.csv")
+              for case in CASES for c in CONTROLLERS}
+    def save(fig, stem):
+        for extension in ("png","pdf"):
+            fig.savefig(output / f"{stem}.{extension}", dpi=170, bbox_inches="tight")
+        plt.close(fig)
+    with plt.rc_context({"font.size":9, "axes.spines.top":False, "axes.spines.right":False,
+                         "axes.grid":True, "grid.alpha":.18}):
+        fig, axes = plt.subplots(3,2,figsize=(11.4,8.5), constrained_layout=True)
+        for j,case in enumerate(CASES):
+            event = 1. if case == "deficit" else 120.05
+            focus = (max(0,event-2),event+10)
+            for c,color,label,ls in zip(CONTROLLERS, colors, labels, styles):
+                trace = traces[case,c]
+                for ax in axes[:2,j]:
+                    ax.plot(trace.time_s, trace.delta_frequency_hz*1000, color=color, ls=ls, lw=1.55, label=label)
+                ax = axes[2,j]
+                ax.plot(trace.time_s, trace.rocof_hz_per_s, color=color, ls=ls, lw=1.5)
+                for r in pd.read_csv(output/case/c/"disturbance_limits.csv").itertuples():
+                    ax.plot([r.time_s]*2, [r.rocof_left_hz_per_s,r.rocof_right_hz_per_s], color=color, ls=ls)
+            axes[0,j].set(title=names[j], xlim=(0,300), ylabel="Frequency deviation [mHz]")
+            axes[1,j].set(xlim=focus, ylabel="Frequency deviation [mHz]")
+            axes[2,j].set(xlim=focus, ylabel="RoCoF [Hz/s]")
+            for ax in axes[:,j]:
+                ax.axvline(event, color="#888888", ls=":", lw=.8)
+                ax.set_xlabel("Time [s]")
+        axes[0,0].legend(fontsize=8)
+        fig.suptitle("Matched frequency trajectories and unfiltered model RoCoF")
+        save(fig,"frequency")
+
+        fig, axes = plt.subplots(2,2,figsize=(11.4,6.9), constrained_layout=True)
+        for j,case in enumerate(CASES):
+            event = 1. if case == "deficit" else 120.05
+            for i,p in enumerate(players):
+                ax = axes[i,j]
+                for c,color,label,ls in zip(CONTROLLERS, colors, labels, styles):
+                    trace = traces[case,c]
+                    ax.plot(trace.time_s, trace[f"{p}_response_mw"], color=color, ls=ls, lw=1.7, label=label)
+                    if c == "selected_gains":
+                        ax.step(trace.time_s, trace[f"{p}_target_mw"], where="post", color=color, ls=":",
+                                lw=1., label="Selected target")
+                ax.axvline(event, color="#888888", ls=":", lw=.8)
+                ax.set(xlim=(max(0.,event-2),event+12), xlabel="Time [s]", ylabel="Response [MW]",
+                       title=f"{names[j]} | {p.replace('renewable_', 'RES ')}")
+        axes[0,0].legend(fontsize=8)
+        fig.suptitle("Follower response during the disturbance")
+        save(fig,"responses")
+
+        table = pd.read_csv(source / "design_gain_payoffs.csv")
+        fig, axes = plt.subplots(1,2,figsize=(10,4.3), constrained_layout=True)
+        for i,(ax,p) in enumerate(zip(axes,players)):
+            matrix = table.pivot(index="theta_1",columns="theta_2",values=f"score_{i+1}_mw_h")
+            values = matrix.to_numpy()
+            im = ax.imshow(values, cmap="Blues",origin="lower",aspect="auto")
+            fig.colorbar(im,ax=ax,label="Mean FPP coefficient [MW h]")
+            for (a,b),v in np.ndenumerate(values):
+                ax.text(b,a,f"{v:.3f}",ha="center",va="center",
+                        color="white" if v > (values.min()+values.max())/2 else "#162d40", fontsize=8)
+            x = matrix.columns.get_loc(gains[players[1]])
+            y = matrix.index.get_loc(gains[players[0]])
+            ax.add_patch(plt.Rectangle((x-.49,y-.49),.98,.98,fill=False,edgecolor="#ed6a20",lw=2.4))
+            ax.set(xticks=range(len(matrix.columns)),xticklabels=[f"{v:g}" for v in matrix.columns],
+                   yticks=range(len(matrix.index)),yticklabels=[f"{v:g}" for v in matrix.index],
+                   xlabel=f"{players[1]} gain",ylabel=f"{players[0]} gain",title=p.replace("_"," "))
+            ax.grid(False)
+        fig.suptitle("Common design cases | outlined cell is the delivered gain pair")
+        save(fig,"gain_tables")
+
+
+def plot_fpp_comparison(output_dir: Path, metrics, summary, accounts, schedule="constant", *, gain_game=False):
     """Keep the independent delivery, assessment statistics and currencies separate."""
     policies = ("fcr_alone", "bilinear_fi", "fpp")
     labels = {"fcr_alone": "FCR alone", "bilinear_fi": "Bilinear FI, gamma=50", "fpp": "FPP fixed droop"}
+    if gain_game:
+        labels["fpp"] = "FPP selected gains"
     colors = {"fcr_alone": "#777777", "bilinear_fi": "#215caf", "fpp": "#b7352d"}
     traces = {p: pd.read_csv(output_dir / "delivery/sample_000" / schedule / p / "trajectory.csv") for p in policies}
     fpp_dir = output_dir / "delivery/sample_000" / schedule / "fpp"
@@ -91,13 +168,14 @@ def plot_fpp_comparison(output_dir: Path, metrics, summary, accounts, schedule="
             axes[1, 1].set(xlim=(0, horizon), title="Model RoCoF, including exact event limits")
         for ax in all_axes.flat:
             ax.set_xlabel("Time [s]")
-        fig.suptitle("Independent representative delivery - fixed policies, identical availability")
+        fig.suptitle("Representative delivery with matched availability and disturbance" if gain_game
+                     else "Independent representative delivery - fixed policies, identical availability")
         save(fig, "delivery_frequency")
 
         fig, all_axes = plt.subplots(3 if reversal else 2, 2,
                                     figsize=(11.5, 10 if reversal else 7), constrained_layout=True)
         axes = (np.array([all_axes[0], all_axes[2]]) if reversal else all_axes)
-        # The overlay uses one switched provider; identify it from saved assignments.
+        # Sum the switched providers identified by the saved role assignment.
         import json
         assignments = json.loads((output_dir / "policy_assignments.json").read_text(encoding="utf-8"))
         switched = [i for i, mode in assignments["fpp"].items() if mode == "fpp"]
@@ -120,20 +198,23 @@ def plot_fpp_comparison(output_dir: Path, metrics, summary, accounts, schedule="
         axes[0, 1].set(xlim=(0, 20), ylabel="Individual delivered response [MW]", title="One response per provider in FPP case")
         axes[0, 1].legend(fontsize=8, ncol=2)
         ramp_path = output_dir / "delivery/sample_000/balanced_ramp/fpp/trajectory.csv"
-        if ramp_path.exists():
-            ramp = pd.read_csv(ramp_path)
-            for identity in ("conventional_1", "conventional_2"):
-                reference = ramp[f"{identity}_reference_mw"]
-                axes[1, 0].plot(ramp.time_s, reference - reference.iloc[0], label=identity.replace("conventional_", "C"))
-            axes[1, 0].set(ylabel="Reference change from solved P0 [MW]", title="Prescribed dispatch targets")
-            axes[1, 0].legend()
-            identity = "conventional_1"
-            axes[1, 1].plot(ramp.time_s, ramp[f"{identity}_measured_mw"] - ramp[f"{identity}_reference_mw"],
-                            label="C1: meter minus reference", color=colors["fpp"])
-            axes[1, 1].plot(fpp_trace.time_s, fpp_trace[f"{identity}_response_mw"],
-                            label="C1: physical response", ls="--", color="#007894")
-            axes[1, 1].set(ylabel="Power [MW]", title="Response and settlement deviation")
-            axes[1, 1].legend(fontsize=8)
+        # Saved historical ramps remain visible when reporting those studies.
+        reference_trace = pd.read_csv(ramp_path) if ramp_path.exists() else fpp_trace
+        for identity in ("conventional_1", "conventional_2"):
+            reference = reference_trace[f"{identity}_reference_mw"]
+            axes[1, 0].plot(reference_trace.time_s, reference - reference.iloc[0],
+                            label=identity.replace("conventional_", "C"))
+        axes[1, 0].set(ylabel="Reference change from solved P0 [MW]",
+            title="Prescribed dispatch targets" if ramp_path.exists() else "Constant ANDES reference: ref_i = P_i,0")
+        axes[1, 0].legend()
+        identity = "conventional_1"
+        axes[1, 1].plot(reference_trace.time_s,
+            reference_trace[f"{identity}_measured_mw"] - reference_trace[f"{identity}_reference_mw"],
+            label="C1: meter minus reference", color=colors["fpp"])
+        axes[1, 1].plot(fpp_trace.time_s, fpp_trace[f"{identity}_response_mw"],
+                        label="C1: physical response", ls="--", color="#007894")
+        axes[1, 1].set(ylabel="Power [MW]", title="Response and settlement deviation")
+        axes[1, 1].legend(fontsize=8)
         if reversal:
             fit_visible_y(axes[0, 0])
             fit_visible_y(axes[0, 1])
@@ -144,7 +225,7 @@ def plot_fpp_comparison(output_dir: Path, metrics, summary, accounts, schedule="
                 ax.legend(fontsize=8, ncol=2)
         for ax in all_axes.flat:
             ax.set_xlabel("Time [s]")
-        fig.suptitle("Representative delivery: control and balanced schedule")
+        fig.suptitle("Representative delivery: control and settlement reference")
         save(fig, "delivery_responses_schedule")
 
         fig, axes = plt.subplots(3 if reversal else 2, 3,

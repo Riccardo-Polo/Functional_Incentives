@@ -1,8 +1,8 @@
-# Actual model-output metering; a prescribed change of dispatch reference.
+# Actual model-output metering with a constant solved ANDES operating-point reference.
 base_config = "fcr.toml"
 scenario_name = "fi_endogenous"
-source_profile = "aemo_fcf_v1.2_2025-06-08"
-assessment_schedule = "balanced_ramp"
+source_profile = "ideal_frequency_gain_game"
+follower_config = "fpp_followers.toml"
 
 [scenario]
 final_time_s = 300.0
@@ -17,17 +17,7 @@ absolute_tolerance = 1e-13
 samples = 8
 seed = 20261026
 
-[[schedules]]
-name = "constant"
-# Delivery-only reference check; does not enter assessment statistics.
-
-[[schedules]]
-name = "balanced_ramp"
-# First interval: C1 260 -> 261 MW; C2 310 -> 309 MW.
-# Other targets stay at the solved P0. The total scheduled generation is fixed.
-# These are scenario targets, not optimized dispatch or imposed meter values.
-[schedules.target_offsets_mw]
-conventional_1 = [1.0]
-conventional_2 = [-1.0]
+# Reference defaults to each generator's solved ANDES P_i,0 for the whole horizon.
+# No endpoint targets or reference ramps are prescribed.
 
 # No regulation prices are supplied. FPP outputs remain MW h coefficients.

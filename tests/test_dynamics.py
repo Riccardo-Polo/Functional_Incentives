@@ -13,6 +13,45 @@ from functional_incentives.simulation import simulate_fcr_power_step
 
 
 class FPPDynamicsTests(unittest.TestCase):
+    def test_gain_controls_hold_their_target_between_ticks_and_cannot_see_future_events(self):
+        from functional_incentives.providers import FPPProviderParameters
+        plant = LinearFrequencyParameters(60, 5, 60, 1.)
+        providers = (FPPProviderParameters("a", 100., .25, 2., 1., theta=0.5),
+                     FPPProviderParameters("b", 100., .25, 3., 1., theta=1.))
+        options = dict(power_deficit_mw=10., start_time_s=.05, final_time_s=.45,
+                       output_time_step_s=.01, measurement_times_s=[.3, .35], maximum_solver_step_s=.01)
+        trace = simulate_fcr_power_step(plant, providers, **options)
+        changed = simulate_fcr_power_step(plant, providers, **options, power_deficit_changes=[(.315, -7.)])
+        before = trace.time_s < .315
+        np.testing.assert_allclose(trace.provider_response_mw[before], changed.provider_response_mw[before], atol=1e-11)
+        np.testing.assert_array_equal(trace.provider_requested_response_mw[trace.time_s < .1], 0.)
+        for left in (0., .1, .2):
+            index = np.searchsorted(trace.time_s, left)
+            mask = (trace.time_s >= left) & (trace.time_s < left + .1)
+            expected = [p.requested_response_mw(trace.delta_frequency_hz[index]) for p in providers]
+            np.testing.assert_allclose(trace.provider_requested_response_mw[mask],
+                                       np.tile(expected, (int(mask.sum()), 1)), atol=1e-10)
+        self.assertGreater(trace.provider_requested_response_mw.max(), 0.)
+        self.assertLessEqual(np.max(abs(trace.provider_response_mw[:, 0])), 2.)
+        self.assertLessEqual(np.max(abs(trace.provider_response_mw[:, 1])), 3.)
+        silent = replace(providers[0], theta=0.)
+        self.assertEqual(silent.requested_response_mw(-.1), 0.)
+
+    def test_ideal_settlement_scores_a_single_small_sample_and_balances(self):
+        from functional_incentives.fpp import DispatchSchedule, IDEAL_PROFILE, settle_fpp
+        schedule = DispatchSchedule(("a","b"), [[100,50],[100,50]], [100,50], [0,0], [200,100], [4,4])
+        times = np.arange(0., 301., 4.)
+        errors = np.zeros_like(times)
+        errors[-1] = -.005
+        meter = schedule.reference_mw(times).copy()
+        meter[-1] += [2., -1.]
+        ideal = settle_fpp(times, errors, meter, schedule, profile=IDEAL_PROFILE)
+        np.testing.assert_array_equal(ideal["samples"].fm_hz, -errors[1:])
+        accounts = ideal["accounts"].query("direction == 'raise'").set_index("provider_id")
+        np.testing.assert_allclose(accounts.loc[["a","b","residual"]].coefficient_mw_h, [2/12,-1/12,-1/12])
+        self.assertTrue((ideal["accounts"].query("direction == 'lower'").coefficient_mw_h == 0.).all())
+        self.assertTrue((settle_fpp(times, errors, meter, schedule)["accounts"].coefficient_mw_h == 0.).all())
+
     def test_signed_disturbance_superposition_and_exact_rocof_at_all_events(self):
         from functional_incentives.metrics import frequency_performance_metrics
         for damping in (0., 1.):
@@ -104,6 +143,8 @@ class FPPDynamicsTests(unittest.TestCase):
             absolute_tolerance=1e-13, provider_operating_power_mw=[100, 50],
             dispatch_schedule=schedule, measurement_times_s=np.arange(4, 301, 4))
         trajectory = simulate_fcr_power_step(physical, providers, **options)
+        np.testing.assert_allclose(trajectory.provider_active_power_mw
+            - schedule.reference_mw(trajectory.time_s), trajectory.provider_response_mw, atol=1e-12)
         self.assertIsNone(trajectory.fi)
         self.assertGreater(trajectory.provider_response_mw[trajectory.time_s < 4, 1].max(), 0)
         np.testing.assert_allclose(trajectory.total_fcr_response_mw, trajectory.provider_response_mw[:, 0])

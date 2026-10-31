@@ -1,7 +1,8 @@
 # Prescribed deficit-to-surplus experiment; all other inputs match aemo_fpp.toml.
 base_config = "fcr.toml"
 scenario_name = "fi_endogenous"
-source_profile = "aemo_fcf_v1.2_2025-06-08"
+source_profile = "ideal_frequency_gain_game"
+follower_config = "fpp_followers.toml"
 
 [scenario]
 final_time_s = 300.0
@@ -22,13 +23,7 @@ seed = 20261026
 time_s = 120.05
 net_power_deficit_mw = -7.0
 
-[[schedules]]
-name = "constant"
-
-[[schedules]]
-name = "balanced_ramp"
-[schedules.target_offsets_mw]
-conventional_1 = [1.0]
-conventional_2 = [-1.0]
+# Reference defaults to each generator's solved ANDES P_i,0 for the whole horizon.
+# No endpoint targets or reference ramps are prescribed.
 
 # As in the preserved baseline, no external regulation price is assumed.

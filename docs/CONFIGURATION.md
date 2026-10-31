@@ -24,31 +24,26 @@ Vary `time_constant_s` and `fi.decision_interval_s` only in separate sensitivity
 studies. They change the controller/dynamics; solver refinement instead keeps
 both fixed and reduces `maximum_solver_step_s` or tightens tolerances.
 
-## AEMO-inspired FPP fixed-policy benchmark
+## FPP gain game
 
-Current study: use `--fpp-benchmark --config configs/aemo_fpp_metered.toml
---output-dir results/aemo_fpp_metered`. Meters read actual P_i,0 plus delivered
-response; dispatch targets are settlement-only references. This overlay selects
-`assessment_schedule = "balanced_ramp"`: initial DT equals solved P_i,0, and
-the 300 s target is 261 MW for C1, 309 MW for C2, unchanged for the other units.
-The 1 MW balanced reallocation is prescribed, not optimized. Future DT selection
-remains open. A constant-reference delivery check is saved separately.
+The maintained overlays reference `configs/fpp_followers.toml`. Its `fleet`
+table extends the selected base scenario through the existing provider and market
+configuration machinery. Both renewables submit zero offers. Each conventional
+machine offers 4 MW. Merit-order clearing then covers the 12 MW requirement.
+The `game` table declares the two provider IDs in payoff-matrix order, a sorted
+nonnegative gain catalogue, design sample count and equally likely unannounced
+disturbance paths. Each path supplies a start time and initial deficit. Optional
+changes replace the absolute deficit level. Assessment sample count and the root
+seed come from the main overlay. All settings are illustrative experiment inputs.
 
-Use `--fpp-benchmark --config configs/aemo_fpp.toml --output-dir results/aemo_fpp`.
-This overlay starts from `fi_endogenous` and extends the horizon to 300 seconds,
-while retaining solved machine parameters, market inputs and availability laws.
-It prescribes a constant assessment reference and a balanced-reference illustration.
-Historical saved runs used ideal tracking; new runs always meter actual output.
-Source-defined sampling/filter/reliability constants are fixed in a versioned
-profile, not ordinary tuning parameters. External directional price metadata is
-optional; absent prices produce MW h repricing coefficients and missing monetary
-fields. No FCR-price substitution or implicit currency conversion is permitted.
-See [AEMO_FPP.md](AEMO_FPP.md) for fields, equations, provenance and commands.
-Use `--fpp-report STUDY_DIR` for report-only regeneration; a new simulation needs
-a new output directory. FPP and TSO optimization flags are mutually exclusive.
-There is currently no FPP-provider optimization flag or configured monetary
-objective. Its design is the next task; see
-[AEMO_FPP.md](AEMO_FPP.md#next-research-step-fpp-provider-optimization).
+Run `--fpp-benchmark --config configs/aemo_fpp_metered.toml --output-dir results/fpp_gain_game`
+in a new directory. The controller interval is 0.1 s, settlement sampling is 4 s
+and the reference is the solved ANDES operating point. Design, assessment and
+delivery are separate streams. The optional reversal overlay prescribes only
+the representative delivery path. See [AEMO_FPP.md](AEMO_FPP.md) for the score,
+selection rules and saved tables.
+
+### Historical fixed-policy experiments
 
 For the separate deficit-to-surplus study, use `configs/aemo_fpp_reversal.toml`
 and `results/aemo_fpp_reversal/`. It preserves the initial +10 MW deficit at 1 s

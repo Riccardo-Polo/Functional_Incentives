@@ -1,18 +1,14 @@
 # Current frequency-control model
 
-Updated 2026-10-28 (FPP metering and next research direction).
-This document describes the single current physical and market implementation.
-
-The opt-in [AEMO-inspired FPP benchmark](AEMO_FPP.md) extends this implementation
-with prescribed dispatch references, an instantaneous-frequency fixed-droop
-controller replacing only the assigned FI response, and separate four-second
-FPP measurement/settlement. The existing FCR and bilinear laws below are retained.
-FPP eligibility includes every metered unit plus an accounting residual; it does
-not add another physical response. The gamma optimizer remains bilinear-specific.
-Since the 27 October metering revision, FPP meters read P_i,0 plus actual
-delivered response; references are subtracted only in settlement. DT does not
-force schedule tracking or change the physical ODE. See `configs/aemo_fpp_metered.toml`
-for the current first-interval targets and [AEMO_FPP.md](AEMO_FPP.md) for details.
+Updated 2026-10-31. The [FPP study](AEMO_FPP.md) selects an ex-ante gain
+for each of two zero-award renewable followers by comparing private mean
+raise-plus-lower FPP coefficients over identical design scenarios. Each provider
+then computes a deadband-droop target from the present frequency every 0.1 s,
+clips it to its own realized availability and holds it until the next tick.
+The plant integrates delivered response through its existing first-order lag.
+For every generator, actual metered power is solved ANDES P_i,0 plus delivered
+response and the settlement reference is constant at P_i,0. All metered units
+and the accounting residual participate in the single-area FPP settlement.
 
 The optional FPP reversal experiment prescribes later signed net-deficit levels
 in the same physical ODE: negative deficit means surplus. A later level replaces
@@ -601,7 +597,3 @@ The accepted TSO objective (D-022, 15 October) is
 Its error/expenditure measurements and common-gamma optimization are implemented.
 See [TSO_DESIGN.md](TSO_DESIGN.md). No numerical w_f is
 chosen implicitly, and no budget/frequency requirement replaces this objective.
-
-The next requested task is FPP provider optimization. It has no adopted
-objective, prices or controller law yet; the existing FPP follower remains a
-fixed benchmark. See [AEMO_FPP.md](AEMO_FPP.md#next-research-step-fpp-provider-optimization).

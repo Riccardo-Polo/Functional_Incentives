@@ -1,15 +1,15 @@
 # Work plan after the Week 5 meeting
 
-**Current priority, 28 October 2026:** design and then implement an optimization
-for an FPP provider. The completed fixed-policy benchmark uses actual metered
-output and a prescribed dispatch reference; it does not optimize the FPP
-controller. Start from [AEMO_FPP.md](AEMO_FPP.md#next-research-step-fpp-provider-optimization)
-and the preserved `results/aemo_fpp_metered/` study. Define the provider's
-decision variables, information available at each decision, objective and
-economic inputs before changing control or settlement. The current unpriced
-MW h coefficients cannot identify monetary profit. Keep FCR clearing, the
-bilinear FI contract and its TSO objective unchanged unless a separate decision
-explicitly changes them. The historical stages below remain research context.
+**31 October 2026.** The first gain game and paired comparison are complete.
+The only empirical pure equilibrium is (2,2) on the configured five-gain
+catalogue. Relative to continuous droop the selected gains reduce integrated
+squared error by 7.58% in a sustained deficit and 6.76% after reversal. Peak
+absolute RoCoF is 0.063830 and 0.108511 Hz/s respectively for all three laws.
+It is the unfiltered physical RHS over 300 s including exact event limits,
+with no averaging window. Results use one independent availability draw.
+See `results/fpp_controller_comparison/ANALYSIS.md` for the paired cases and
+`results/fpp_gain_game/ANALYSIS.md` for design and holdout. Interpretation
+outside the tested gain grid would require a separate design and holdout.
 
 **Earlier direction, 24 October 2026 (D-029):** understand the existing setup
 through controlled gamma sweeps and metric-specific cost-performance curves.
@@ -300,18 +300,23 @@ frequency and metered deviations; its private activation cost is separate.
 The baseline has no external raise/lower prices, so monetary net income cannot
 yet be computed from its coefficients.
 
-1. State the provider's controllable action and feasible set, including power,
-   ramping or energy limits only if explicitly adopted. Decide whether dispatch
-   targets stay prescribed or become a separate energy-dispatch decision.
-2. Specify the information set and timing: what the provider observes before
+1. Specify the transfer budget and participants, including the accounting
+   residual, all-helpful/all-zero outcomes and charge concentration. Identify
+   which measurement heuristics could be simplified without losing the chosen
+   redistribution property. Keep the reference fixed at solved P_i,0.
+2. State the provider's controllable action and feasible set, including power,
+   ramping or energy limits only if explicitly adopted.
+3. Specify the information set and timing: what the provider observes before
    acting, what it can forecast, and whether the policy is chosen before the
    event or updated during it. Future availability and frequency draws must not
    enter a causal decision as known values.
-3. Define the objective and economic inputs. If optimizing money, identify
+   Treat others' behavior through explicit beliefs, forecasts or strategies;
+   assess whether a tractable Nash equilibrium exists, without assuming one.
+4. Define the objective and economic inputs. If optimizing money, identify
    directional FPP prices, currency and conversion basis, the accounting horizon,
    activation costs and any other payments to include. Keep the AEMO-inspired
    settlement formula and the provider's own objective conceptually distinct.
-4. Compare the optimized policy with fixed droop on matched assessment draws
+5. Compare the optimized policy with fixed droop on matched assessment draws
    and independent validation/delivery draws. Report profit components and
    frequency nadir, terminal error, integrated error and RoCoF. State the RoCoF
    calculation method, measurement window and summary statistic. Check solver
@@ -335,5 +340,7 @@ saturation, calibration and repeated-cycle work remain separate increments.
 - Step 6: inter-cycle forecasting, events, state continuity/reset, gamma and
   participation updates. No new rule is assumed in advance.
 - FPP provider optimization: controllable action, information timing, objective,
-  directional price evidence and currency, private costs, treatment of dispatch
-  targets, and out-of-sample comparison protocol.
+  directional price evidence and currency, private costs, transfer-budget closure,
+  all-helpful cases, charge concentration, measurement simplifications, possible
+  Nash equilibrium and out-of-sample comparison protocol. The constant P_i,0
+  reference is decided and is not an open dispatch-optimization variable.

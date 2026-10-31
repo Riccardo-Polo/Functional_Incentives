@@ -345,6 +345,12 @@ def simulate_fcr_power_step(
     if measurements.size:
         time_s = np.unique(np.concatenate((time_s, measurements)))
     fpp_indices = [j for j, p in enumerate(provider_tuple) if isinstance(p, FPPProviderParameters)]
+    sampled_fpp = [j for j in fpp_indices if provider_tuple[j].theta is not None]
+    decision_interval = fi_decision_interval_s if fi_count else None
+    if sampled_fpp:
+        if fi_count and fi_decision_interval_s != 0.1:
+            raise ValueError("joint FI/FPP simulation requires a common 0.1 s control clock")
+        decision_interval = 0.1
     physical_size = number_of_providers + 1
     # Ledger blocks: gross rewards, positive penalty magnitudes, activation costs.
     ledger_end = physical_size + 3 * fi_count
@@ -371,6 +377,9 @@ def simulate_fcr_power_step(
             power_response_mw=float(np.sum(responses)), parameters=parameters,
         )
         for j, provider in enumerate(provider_tuple):
+            if j in sampled_fpp:
+                derivative[j + 1] = (targets[j] - responses[j]) / provider.time_constant_s
+                continue
             signal = targets[j] if isinstance(provider, FIProviderParameters) else delta_f
             derivative[j + 1] = provider.response_derivative_mw_per_s(float(responses[j]), signal)
         for column, (j, provider) in enumerate(zip(fi_indices, fi_providers, strict=True)):
@@ -381,11 +390,13 @@ def simulate_fcr_power_step(
         derivative[-1] = delta_f**2
         return derivative
 
-    boundaries = (make_output_times(final_time_s, fi_decision_interval_s)
-                  if fi_count else np.array([start_time_s, final_time_s]))
+    boundaries = (make_output_times(final_time_s, decision_interval)
+                  if decision_interval is not None else np.array([start_time_s, final_time_s]))
     for left, right in zip(boundaries[:-1], boundaries[1:], strict=True):
         duration = float(right - left)
         sampled_error = float(current[0])
+        for j in sampled_fpp:
+            targets[j] = provider_tuple[j].requested_response_mw(sampled_error)
         initial_responses = current[1:physical_size].copy()
         initial_ledger = current[physical_size:ledger_end].reshape(3, fi_count).copy()
         decisions = [choose_fi_target(
@@ -437,6 +448,8 @@ def simulate_fcr_power_step(
             current = solver_result.y[:, -1].copy()
 
         interval_mask = (time_s >= left) & ((time_s <= right) if right == final_time_s else (time_s < right))
+        for j in sampled_fpp:
+            requested[interval_mask, j] = targets[j]
         elapsed = time_s[interval_mask] - left
         actual = current[physical_size:ledger_end].reshape(3, fi_count) - initial_ledger
         for column, (j, provider, decision) in enumerate(zip(fi_indices, fi_providers, decisions, strict=True)):
@@ -471,7 +484,7 @@ def simulate_fcr_power_step(
     delta_frequency_hz = state[:, 0]
     provider_response_mw = state[:, 1:physical_size]
     for j, provider in enumerate(provider_tuple):
-        if isinstance(provider, FCRProviderParameters):
+        if isinstance(provider, FCRProviderParameters) and j not in sampled_fpp:
             requested[:, j] = provider.requested_response_mw(delta_frequency_hz)
     accounting = None
     if fi_count:

@@ -23,6 +23,7 @@ MISALIGNMENT_BAND_HZ = 0.015
 RELIABILITY_AMPLITUDE_HZ = 0.01
 MIN_DIRECTIONAL_SAMPLES = 7
 SOURCE_PROFILE = "aemo_fcf_v1.2_2025-06-08"
+IDEAL_PROFILE = "ideal_frequency_gain_game"
 RESIDUAL_ID = "residual"
 
 
@@ -192,7 +193,8 @@ def same_sign_contribution_factors(performance):
 
 
 def settle_fpp(time_s, delta_frequency_hz, measured_power_mw, schedule: DispatchSchedule,
-               prices: RegulationPrices | None = None, *, initial_history_hz=None) -> dict[str, pd.DataFrame]:
+               prices: RegulationPrices | None = None, *, initial_history_hz=None,
+               profile=SOURCE_PROFILE) -> dict[str, pd.DataFrame]:
     """Settle complete trajectories without knowing their physical controllers.
 
     Exact 4-second measurements must be present; interpolation, missing-data
@@ -200,6 +202,11 @@ def settle_fpp(time_s, delta_frequency_hz, measured_power_mw, schedule: Dispatch
     Nominal prehistory is explicit in the benchmark; optional supplied history
     supports independent external trajectory/initialization tests.
     """
+    if profile not in (SOURCE_PROFILE, IDEAL_PROFILE):
+        raise ValueError(f"unknown settlement profile: {profile}")
+    ideal = profile == IDEAL_PROFILE
+    if ideal and initial_history_hz is not None:
+        raise ValueError("ideal frequency measurement uses no filter prehistory")
     times = np.asarray(time_s, dtype=float)
     frequency = np.asarray(delta_frequency_hz, dtype=float)
     power = np.asarray(measured_power_mw, dtype=float)
@@ -225,7 +232,7 @@ def settle_fpp(time_s, delta_frequency_hz, measured_power_mw, schedule: Dispatch
     history = np.zeros(HISTORY_SAMPLES) if initial_history_hz is None else np.asarray(initial_history_hz, dtype=float)
     if history.shape != (HISTORY_SAMPLES,) or not np.all(np.isfinite(history)):
         raise ValueError("initial history requires 30 finite 4-second frequency deviations")
-    if history[-1] != frequency[0]:
+    if not ideal and history[-1] != frequency[0]:
         raise ValueError("initial history endpoint must equal the measured frequency at t=0")
     full_errors = np.concatenate((history, errors))
     sample_rows, history_rows, direction_rows, account_rows = [], [], [], []
@@ -234,14 +241,14 @@ def settle_fpp(time_s, delta_frequency_hz, measured_power_mw, schedule: Dispatch
         start = interval * SAMPLES_PER_INTERVAL
         stop = start + SAMPLES_PER_INTERVAL
         window_errors = full_errors[start:stop + HISTORY_SAMPLES]
-        window_fm = frequency_measure(window_errors)
+        window_fm = -window_errors if ideal else frequency_measure(window_errors)
         fm = window_fm[HISTORY_SAMPLES:]
         fd = errors[start:stop]
         excluded = (fm * fd > 0) & (abs(fd) > MISALIGNMENT_BAND_HZ)
         dev = np.column_stack((deviations[start:stop], -deviations[start:stop].sum(axis=1)))
         sum_pos = np.maximum(dev, 0).sum(axis=1)
         sum_neg = np.minimum(dev, 0).sum(axis=1)
-        for k in range(len(window_fm)):
+        for k in range(HISTORY_SAMPLES if ideal else 0, len(window_fm)):
             history_rows.append(dict(interval=interval + 1, time_s=interval * INTERVAL_SECONDS
                                      + (k - HISTORY_SAMPLES + 1) * SAMPLE_SECONDS,
                                      delta_frequency_hz=window_errors[k], fm_hz=window_fm[k],
@@ -257,14 +264,19 @@ def settle_fpp(time_s, delta_frequency_hz, measured_power_mw, schedule: Dispatch
                             f"{identity}_deviation_mw": dev[k, j]})
             sample_rows.append(row)
         for direction in ("raise", "lower"):
-            reliable, count, amplitude, reason = directional_reliability(fm, direction)
             directional = fm > 0 if direction == "raise" else fm < 0
+            if ideal:
+                reliable, count = True, int(directional.sum())
+                amplitude = float(np.max(abs(fm[directional]), initial=0.))
+                reason = "ideal_measurement"
+            else:
+                reliable, count, amplitude, reason = directional_reliability(fm, direction)
             # Misalignment excludes PERFORMANCE only. Reliability and RCR use raw FM.
             weights = np.where(directional & ~excluded, fm, 0.)
             performance = weights @ dev if reliable else np.full(len(identities), np.nan)
             factors = same_sign_contribution_factors(performance)
             rcr = (float(np.max(sum_pos[directional])) if direction == "raise"
-                   else float(-np.min(sum_neg[directional]))) if reliable else 0.
+                   else float(-np.min(sum_neg[directional]))) if reliable and count else 0.
             coefficients = factors * rcr / 12 if reliable else np.zeros(len(identities))
             direction_rows.append(dict(interval=interval + 1, direction=direction, reliable=reliable,
                                        status=reason, directional_sample_count=count,

@@ -28,19 +28,127 @@ from functional_incentives.metrics import (summarize_tso_samples, summarize_tso_
 
 
 class FPPExperimentTests(unittest.TestCase):
-    def test_changed_dispatch_reference_is_declared_before_assessment(self):
+    def test_zero_disturbance_counts_every_gain_pair_without_network_integration(self):
+        from functional_incentives.fpp_study import prepare_gain_study
+        players = ["a", "b"]
+        providers = tuple(replace(provider(p, 5), participation="fi", fi_gamma_eur_per_hz_mw_s=50.,
+                                  fi_rho_eur_per_mw2_s=1.) for p in players)
+        cleared = clear_fcr_block(providers, requirement_mw=0., nominal_frequency_hz=60.)
+        overlay = dict(game=dict(players=players,gains=[0.,1.],design_samples=2,
+                                 paths=[dict(name="no_event", start_time_s=0., power_deficit_mw=0.)]),
+                       assessment=dict(seed=7, samples=2))
+        with tempfile.TemporaryDirectory(dir=experiment.PROJECT_ROOT) as temp:
+            directory = Path(temp)
+            with patch("functional_incentives.fpp_study.simulate_fcr_power_step") as solver:
+                _, _, count = prepare_gain_study(directory, overlay, cleared, None, None, {})
+            self.assertEqual(count, 0)
+            solver.assert_not_called()
+            scores = pd.read_csv(directory / "design_gain_scores.csv")
+            self.assertEqual(len(scores), 8)
+            self.assertTrue((scores[["score_1_mw_h","score_2_mw_h"]] == 0.).all().all())
+            self.assertEqual(json.loads((directory/"gain_equilibrium.json").read_text())["design_timing"]["exact_zero_scores"], 8)
+
+    def test_gain_study_freezes_design_policy_before_holdout_and_delivery(self):
+        from functional_incentives.fpp_study import load_fpp_overlay, make_dispatch_schedules, prepare_gain_study
+        from functional_incentives.providers import FPPProviderParameters
+        overlay, config, _, _ = load_fpp_overlay(experiment.PROJECT_ROOT / "configs/aemo_fpp.toml")
+        with redirect_stdout(io.StringIO()):
+            _, cleared, plant = experiment.prepare_experiment(config)
+        overlay["game"].update(gains=[0., 1.], design_samples=2)
+        overlay["game"]["paths"] = [p for p in overlay["game"]["paths"] if p["power_deficit_mw"] > 0]
+        overlay["assessment"]["samples"] = 2
+        schedule = make_dispatch_schedules(cleared, overlay["schedules"], 300)["constant"]
+        calls = []
+        def synthetic_meters(_plant, providers, *, dispatch_schedule, **options):
+            # Favor delivery in design, penalize it in holdout. Re-selection would flip both gains.
+            sign = 1 if len(calls) < 8 else -1
+            times = np.arange(0., 301., 4.)
+            errors = np.full_like(times, -.05)
+            errors[0] = 0.
+            meters = dispatch_schedule.reference_mw(times).copy()
+            for j, p in enumerate(providers):
+                if isinstance(p, FPPProviderParameters):
+                    meters[1:, j] += sign * p.theta * p.reserve_mw
+            calls.append((tuple(p.reserve_mw for p in providers), options["start_time_s"],
+                          options["power_deficit_mw"], options["power_deficit_changes"]))
+            return SimpleNamespace(time_s=times, delta_frequency_hz=errors, provider_active_power_mw=meters)
+        with tempfile.TemporaryDirectory(dir=experiment.PROJECT_ROOT) as temp:
+            directory = Path(temp)
+            with patch("functional_incentives.fpp_study.simulate_fcr_power_step", side_effect=synthetic_meters):
+                episodes, _, integrations = prepare_gain_study(directory, overlay, cleared, plant, schedule, {})
+            decision = json.loads((directory / "gain_equilibrium.json").read_text())
+            audit = pd.read_csv(directory / "holdout_deviations.csv")
+        self.assertEqual(integrations, 16)
+        self.assertEqual(decision["pure_profiles"], [[1.,1.]])
+        self.assertTrue(all((r["theta_1"], r["theta_2"]) == (1.,1.) for r in episodes))
+        self.assertEqual([r["bank"] for r in episodes], ["assessment", "assessment", "delivery"])
+        self.assertTrue((audit.query("deviating_theta == 0").paired_gain_mw_h > 0.).all())
+        for offset in range(0, len(calls), 4):
+            self.assertEqual(len(set(calls[offset:offset+4])), 1)
+        self.assertNotEqual(calls[0][0], calls[8][0])
+
+    def test_gain_search_uses_paired_inputs_and_separate_private_best_responses(self):
+        from functional_incentives.fpp_game import evaluate_gain_bank, gain_equilibrium, deviation_gains
+        bank = [dict(bank="design", sample=i, path=str(i), a=a, b=b)
+                for i, (a,b) in enumerate(((.5,3.), (3.,1.)))]
+        gains = [.5, 1.]
+        # The second provider prefers a different column depending on the first player's row.
+        scores = np.array([[[2,1],[3,3]], [[4,3],[5,2]]], dtype=float)
+        cases = []
+        def score(case, pair):
+            cases.append((pair, case["a"], case["b"], case["path"]))
+            return scores[gains.index(pair[0]), gains.index(pair[1])] + [case["a"], case["b"]]
+        values, records = evaluate_gain_bank(bank, gains, score)
+        for pair in ((.5,.5),(.5,1.),(1.,.5),(1.,1.)):
+            self.assertEqual([row[1:] for row in cases if row[0] == pair], [(.5,3.,"0"),(3.,1.,"1")])
+        self.assertEqual(len(records), 8)
+        x, y, pure = gain_equilibrium(values.mean(axis=0))
+        self.assertEqual(pure, [[1,0]])
+        np.testing.assert_array_equal(x, [0,1])
+        np.testing.assert_array_equal(y, [1,0])
+        self.assertTrue(all(v.max() == 0. for v in deviation_gains(values, x, y)))
+
+    def test_gain_solver_handles_a_mixed_equilibrium_and_deterministic_ties(self):
+        from functional_incentives.fpp_game import gain_equilibrium, deviation_gains
+        game = np.array([[[3,0],[0,2]], [[0,1],[1,0]]])
+        x, y, pure = gain_equilibrium(game)
+        self.assertFalse(pure)
+        np.testing.assert_allclose([x,y], [[1/3,2/3],[.25,.75]])
+        self.assertTrue(all(v.max() < 1e-10 for v in deviation_gains(game, x, y)))
+        x, y, pure = gain_equilibrium(np.zeros((2,2,2)))
+        self.assertEqual(len(pure), 4)
+        np.testing.assert_array_equal([x,y], [[1,0],[1,0]])
+
+    def test_current_references_use_solved_powers_for_every_provider_and_interval(self):
         from functional_incentives.fpp_study import load_fpp_overlay, make_dispatch_schedules
-        from functional_incentives.metrics import summarize_fpp_assessment
         path = experiment.PROJECT_ROOT / "configs/aemo_fpp_metered.toml"
         overlay, config, prices, _ = load_fpp_overlay(path)
-        self.assertEqual(overlay["assessment_schedule"], "balanced_ramp")
+        self.assertEqual(overlay["assessment_schedule"], "constant")
         self.assertIsNone(prices)
         with redirect_stdout(io.StringIO()):
             _, cleared, _ = experiment.prepare_experiment(config)
-        schedules = make_dispatch_schedules(cleared, overlay["schedules"], 300)
-        targets = schedules["balanced_ramp"].targets_mw
-        np.testing.assert_allclose(targets[1] - targets[0], [1, -1, 0, 0, 0])
-        np.testing.assert_allclose(targets[:, :2], [[260, 310], [261, 309]])
+        solved = {p.provider_id: p.operating_power_mw for p in cleared.providers}
+        self.assertEqual([p.provider_id for p, m in zip(cleared.providers, cleared.participation_modes) if m == "fi"],
+                         overlay["game"]["players"])
+        self.assertEqual([a.quantity_mw for a in cleared.market.awards], [4.,4.,4.,0.,0.])
+        # Use the actual solved slack power as well as prescribed non-slack powers.
+        self.assertAlmostEqual(solved["conventional_3"], 250.906095586, places=8)
+        reordered = replace(cleared, providers=tuple(reversed(cleared.providers)))
+        for name in ("aemo_fpp.toml", "aemo_fpp_metered.toml", "aemo_fpp_reversal.toml"):
+            with self.subTest(config=name):
+                resolved, _, _, _ = load_fpp_overlay(path.parent / name)
+                self.assertEqual(resolved["assessment_schedule"], "constant")
+                self.assertEqual(resolved["schedules"], [{"name": "constant"}])
+                schedules = make_dispatch_schedules(reordered, resolved["schedules"], 600)
+                self.assertEqual(set(schedules), {"constant"})
+                schedule = schedules["constant"]
+                expected = [solved[i] for i in schedule.provider_ids]
+                np.testing.assert_array_equal(schedule.targets_mw, np.tile(expected, (3, 1)))
+                np.testing.assert_array_equal(schedule.reference_mw([0, 4, 150, 300, 304, 600]),
+                                              np.tile(expected, (6, 1)))
+
+    def test_historical_assessment_schedule_stays_separate_from_delivery(self):
+        from functional_incentives.metrics import summarize_fpp_assessment
         rows = [{"bank": "assessment", "sample": s, "schedule": "balanced_ramp", "policy": p,
                  "metric": s + j} for s in range(2) for j, p in enumerate(("fcr_alone", "bilinear_fi", "fpp"))]
         rows.append(dict(bank="delivery", sample=0, schedule="constant", policy="fpp", metric=999))
@@ -88,8 +196,12 @@ class FPPExperimentTests(unittest.TestCase):
         overlay, config, prices, _ = load_fpp_overlay(experiment.PROJECT_ROOT / "configs/aemo_fpp.toml")
         base = tomllib.loads(experiment.DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
         original = dict((n, c) for n, _, c in experiment.configured_scenarios(base))["fi_endogenous"]
-        for key in ("providers", "market", "availability", "decision", "fi"):
+        for key in ("market", "availability", "fi"):
             self.assertEqual(config[key], original[key])
+        self.assertEqual(config["decision"]["mode"], "fixed")
+        for current, previous in zip(config["providers"], original["providers"], strict=True):
+            for key in ("mean_mw", "variance_mw2", "reserve_capacity_mw", "time_constant_s", "inertia_s"):
+                self.assertEqual(current[key], previous[key])
         self.assertEqual(config["scenario"]["power_deficit_mw"], 10)
         self.assertEqual(config["scenario"]["final_time_s"], 300)
         self.assertIsNone(prices)
@@ -105,7 +217,8 @@ class FPPExperimentTests(unittest.TestCase):
     def test_fpp_cli_rejects_optimizer_and_ordinary_comparison_overrides(self):
         for flags in (["--fpp-benchmark", "--tso-optimize"], ["--fpp-benchmark", "--compare"],
                       ["--fpp-benchmark", "--frequency-weight", "10000"],
-                      ["--fpp-benchmark", "--scenario", "fi_endogenous"], ["--fpp-benchmark"]):
+                      ["--fpp-benchmark", "--scenario", "fi_endogenous"], ["--fpp-benchmark"],
+                      ["--fpp-compare-controllers", "unused"], ["--fpp-compare-controllers", "unused", "--tso-optimize"]):
             with patch("sys.argv", ["run_fcr", *flags]), self.assertRaises(SystemExit), redirect_stdout(io.StringIO()):
                 experiment.main()
 

@@ -1,7 +1,8 @@
-# Fixed-policy assessment; source constants are defined by the documented profile.
+# Matched-scenario assessment of two frozen FPP gain policies.
 base_config = "fcr.toml"
 scenario_name = "fi_endogenous"
-source_profile = "aemo_fcf_v1.2_2025-06-08"
+source_profile = "ideal_frequency_gain_game"
+follower_config = "fpp_followers.toml"
 
 [scenario]
 final_time_s = 300.0
@@ -15,19 +16,10 @@ absolute_tolerance = 1e-13
 [assessment]
 samples = 8
 seed = 20261026
-# SeedSequence children: 0=assessment, 1=independent representative delivery.
-# No policy selection on either stream.
+# Independent streams for design, holdout, delivery and mixed-policy draws.
 
-[[schedules]]
-name = "constant"
-
-[[schedules]]
-name = "balanced_ramp"
-# Prescribed offsets from solved ANDES powers, at the 300-second endpoint.
-# Full availability support is retained; these are illustrative scenario data.
-[schedules.target_offsets_mw]
-conventional_1 = [1.0]
-conventional_2 = [-1.0]
+# Reference defaults to each generator's solved ANDES P_i,0 for the whole horizon.
+# No endpoint targets or reference ramps are prescribed.
 
 # Prices are intentionally absent: export CF * RCR / 12 in MW h.
 # Optional [prices] requires raise_per_mw_h, lower_per_mw_h, currency,

@@ -102,24 +102,28 @@ def symmetric_reserve_capacity_mw(
 
 @dataclass(frozen=True)
 class FPPProviderParameters(FCRProviderParameters):
-    """Fixed-gain causal benchmark controller; no FPP price enters its law.
+    """Deadband droop with an episode gain and actual available headroom.
 
-    reserve_mw is actual availability, not an FCR award. The source absolute
-    +/-0.015 Hz deadband is retained around 60 Hz as an explicit adaptation.
-    Inheriting physical lag/bound validation does not assign an FCR market role.
+    The simulator samples selected gains every 0.1 s and holds the resulting
+    target across solver steps. Historical trajectories use continuous droop.
     """
 
     rho_eur_per_mw2_s: float
+    # None identifies the historical continuous fixed-droop benchmark.
+    theta: float | None = None
 
     def __post_init__(self):
         super().__post_init__()
+        if self.theta is not None and (not isfinite(self.theta) or self.theta < 0):
+            raise ValueError("FPP theta must be finite and nonnegative")
         if not isfinite(self.rho_eur_per_mw2_s) or self.rho_eur_per_mw2_s <= 0:
             raise ValueError("FPP activation cost requires the existing positive FI rho")
 
     def requested_response_mw(self, delta_frequency_hz):
         error = np.asarray(delta_frequency_hz)
         deadband_error = np.sign(error) * np.maximum(abs(error) - 0.015, 0.)
-        return np.clip(-self.gain_mw_per_hz * deadband_error, -self.reserve_mw, self.reserve_mw)
+        gain = self.gain_mw_per_hz * (1.0 if self.theta is None else self.theta)
+        return np.clip(-gain * deadband_error, -self.reserve_mw, self.reserve_mw)
 
 
 @dataclass(frozen=True)

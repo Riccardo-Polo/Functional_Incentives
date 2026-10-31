@@ -1,4 +1,4 @@
-"""Reproducible fixed-policy FCR/FI/FPP comparison through the existing model."""
+"""Matched FCR/FI/FPP experiments and historical fixed-policy reports."""
 
 from __future__ import annotations
 
@@ -13,8 +13,10 @@ import tomllib
 import numpy as np
 import pandas as pd
 
-from .fpp import (DispatchSchedule, RegulationPrices, SOURCE_PROFILE, SAMPLE_SECONDS,
+from .fpp import (DispatchSchedule, RegulationPrices, SOURCE_PROFILE, IDEAL_PROFILE, SAMPLE_SECONDS,
                   complete_interval_count, settle_fpp)
+from .fpp_game import (GAP_TOLERANCE_MW_H, validate_game, draw_gain_bank, path_options,
+                       evaluate_gain_bank, gain_equilibrium, deviation_gains)
 from .providers import FCRProviderParameters, FPPProviderParameters
 from .simulation import realize_fcr_block, simulate_fcr_power_step, power_deficit_events
 from .metrics import summarize_fpp_benchmark, summarize_fpp_assessment
@@ -31,11 +33,14 @@ def load_fpp_overlay(path: Path):
     from .experiment import configured_scenarios
     overlay = tomllib.loads(path.read_text(encoding="utf-8"))
     unknown = set(overlay) - {"base_config", "scenario_name", "source_profile", "scenario", "numerics",
-                              "assessment", "assessment_schedule", "schedules", "prices", "disturbance_changes"}
+                              "assessment", "assessment_schedule", "schedules", "prices", "disturbance_changes",
+                              "follower_config"}
     if unknown:
         raise ValueError(f"unsupported FPP overlay fields: {sorted(unknown)}")
-    if overlay["source_profile"] != SOURCE_PROFILE:
+    if overlay["source_profile"] not in (SOURCE_PROFILE, IDEAL_PROFILE):
         raise ValueError("unsupported FPP source profile; constants are not tuning knobs")
+    if ("follower_config" in overlay) != (overlay["source_profile"] == IDEAL_PROFILE):
+        raise ValueError("the two-provider game requires its ideal-frequency settlement profile")
     base_path = (path.parent / overlay["base_config"]).resolve()
     source = base_path.read_text(encoding="utf-8")
     base = json.loads(source) if base_path.suffix == ".json" else tomllib.loads(source)
@@ -43,6 +48,16 @@ def load_fpp_overlay(path: Path):
     if overlay["scenario_name"] not in variants:
         raise ValueError("FPP overlay names an unknown base scenario")
     config = variants[overlay["scenario_name"]]
+    if "follower_config" in overlay:
+        setup_path = path.parent / overlay["follower_config"]
+        setup = tomllib.loads(setup_path.read_text(encoding="utf-8"))
+        if set(setup) != {"fleet", "game"} or set(setup["fleet"]) - {"decision", "providers", "market"}:
+            raise ValueError("invalid FPP follower setup")
+        # Use the existing scenario override and clearing interfaces.
+        variant = dict(name="fpp_followers", label="Two FPP followers", **setup["fleet"])
+        config = configured_scenarios({**config, "comparisons": [variant]})[-1][2]
+        overlay["game"] = setup["game"]
+        validate_game(overlay["game"], overlay["scenario"]["final_time_s"])
     if set(overlay["scenario"]) - {"final_time_s", "output_time_step_s", "maximum_solver_step_s"}:
         raise ValueError("FPP overlay only changes horizon and numerical sampling, not physical/market inputs")
     config["scenario"].update(overlay["scenario"])
@@ -61,7 +76,14 @@ def load_fpp_overlay(path: Path):
             or assessment["samples"] < 2 or type(assessment["seed"]) is not int or assessment["seed"] < 0):
         raise ValueError("assessment requires at least two samples and a nonnegative integer seed")
     prices = RegulationPrices(**overlay["prices"]) if "prices" in overlay else None
-    if overlay.get("assessment_schedule", "constant") not in [s["name"] for s in overlay["schedules"]]:
+    # The current reference is the solved ANDES operating point for the whole
+    # horizon. Explicit schedules remain supported for historical replay only.
+    overlay.setdefault("schedules", [{"name": "constant"}])
+    overlay.setdefault("assessment_schedule", "constant")
+    if "game" in overlay and (overlay["schedules"] != [{"name": "constant"}]
+                              or overlay["assessment_schedule"] != "constant"):
+        raise ValueError("gain-game settlement requires the constant solved ANDES reference")
+    if overlay["assessment_schedule"] not in [s["name"] for s in overlay["schedules"]]:
         raise ValueError("assessment_schedule must name a declared dispatch reference")
     return overlay, config, prices, base_path
 
@@ -92,10 +114,13 @@ def make_dispatch_schedules(cleared, raw_schedules, final_time_s):
     return schedules
 
 
-def policy_response_parameters(cleared, block, policy):
+def policy_response_parameters(cleared, block, policy, *, gains=None):
     """Only original FI assignments change; FCR parameters are returned intact."""
     if policy not in POLICIES:
         raise ValueError("unknown fixed comparison policy")
+    if gains is not None and (policy != "fpp" or set(gains) != {
+            p.provider_id for p, mode in zip(cleared.providers, cleared.participation_modes) if mode == "fi"}):
+        raise ValueError("supply one frozen gain for each FPP follower")
     responses = []
     for p, response, mode, gain, settlement in zip(cleared.providers, block.response_parameters,
             cleared.participation_modes, cleared.gains_mw_per_hz, block.settlements, strict=True):
@@ -105,7 +130,8 @@ def policy_response_parameters(cleared, block, policy):
             responses.append(FCRProviderParameters(p.provider_id, gain, p.time_constant_s, 0.))
         else:
             responses.append(FPPProviderParameters(p.provider_id, gain, p.time_constant_s,
-                                                   settlement.available_mw, p.fi_rho_eur_per_mw2_s))
+                                                   settlement.available_mw, p.fi_rho_eur_per_mw2_s,
+                                                   None if gains is None else gains[p.provider_id]))
     return tuple(responses)
 
 
@@ -132,6 +158,102 @@ def save_trajectory(trajectory, schedule, directory):
         save_fi_accounting(trajectory, directory)
 
 
+def prepare_gain_study(output_dir, overlay, cleared, parameters, schedule, options):
+    """Design first, freeze the policy, then assess it on fresh coupled scenarios."""
+    from scipy.stats import t
+
+    game = overlay["game"]
+    players, gains, paths = game["players"], game["gains"], game["paths"]
+    followers = {p.provider_id for p, mode in zip(cleared.providers, cleared.participation_modes)
+                 if mode == "fi"}
+    if set(players) != followers:
+        raise ValueError(f"game players {players} must match actual zero-award followers {sorted(followers)}")
+    path_by_name = {p["name"]: p for p in paths}
+    streams = np.random.SeedSequence(overlay["assessment"]["seed"]).spawn(5)
+
+    def evaluate(bank):
+        integrations = 0
+        blocks = {r["sample"]: realize_fcr_block(cleared,
+            {p.provider_id: r[p.provider_id] for p in cleared.providers}) for r in bank}
+
+        def score(row, profile):
+            nonlocal integrations
+            path = path_by_name[row["path"]]
+            if profile == (gains[0], gains[0]):
+                print(f"FPP gain table: {row['bank']} case {row['sample']+1}/{len(bank)}, {row['path']}", flush=True)
+            # At the solved point with zero disturbance throughout the horizon
+            # every response, FM sample and settlement coefficient is exactly zero.
+            if path["power_deficit_mw"] == 0 and all(level == 0 for _, level in path.get("changes", ())):
+                return (0., 0.)
+            responses = policy_response_parameters(cleared, blocks[row["sample"]], "fpp",
+                                                   gains=dict(zip(players, profile, strict=True)))
+            case_options = {**options, **path_options(path)}
+            trace = simulate_fcr_power_step(parameters, responses, dispatch_schedule=schedule, **case_options)
+            integrations += 1
+            accounts = settle_fpp(trace.time_s, trace.delta_frequency_hz, trace.provider_active_power_mw,
+                                  schedule, profile=IDEAL_PROFILE)["accounts"]
+            if accounts.groupby(["interval", "direction"]).coefficient_mw_h.sum().abs().max() > 1e-10:
+                raise RuntimeError("gain-game settlement does not balance including the residual")
+            return accounts.groupby("provider_id").coefficient_mw_h.sum().loc[players].to_numpy()
+
+        wall, cpu = perf_counter(), process_time()
+        values, records = evaluate_gain_bank(bank, gains, score)
+        bank_name = bank[0]["bank"]
+        records.to_csv(output_dir / f"{bank_name}_gain_scores.csv", index=False)
+        mean_table = records.groupby(["theta_1", "theta_2"])[["score_1_mw_h", "score_2_mw_h"]].mean()
+        mean_table.to_csv(output_dir / f"{bank_name}_gain_payoffs.csv")
+        return values, dict(integrations=integrations, profile_evaluations=len(records),
+                            exact_zero_scores=len(records)-integrations,
+                            wall_s=perf_counter()-wall, cpu_s=process_time()-cpu)
+
+    design = draw_gain_bank("design", game["design_samples"], streams[2], cleared.providers, paths)
+    pd.DataFrame(design).to_csv(output_dir / "design_scenarios.csv", index=False)
+    design_values, design_timing = evaluate(design)
+    mean = design_values.mean(axis=0)
+    start_wall, start_cpu = perf_counter(), process_time()
+    x, y, pure = gain_equilibrium(mean)
+    result = dict(players=players, catalogue=gains, score="raise plus lower CF * RCR / 12 in MW h",
+                  decision_interval_s=0.1, tolerance_mw_h=GAP_TOLERANCE_MW_H,
+                  selection="first pure profile in ascending catalogue order, else first feasible support pair",
+                  pure_profiles=[[gains[i], gains[j]] for i, j in pure],
+                  kind="pure" if pure else "mixed", probabilities={players[0]: x.tolist(), players[1]: y.tolist()},
+                  design_gaps_mw_h=[float(v.max()) for v in deviation_gains(mean, x, y)],
+                  selection_wall_s=perf_counter()-start_wall, selection_cpu_s=process_time()-start_cpu,
+                  design_timing=design_timing)
+    write_json(output_dir / "gain_equilibrium.json", result)
+
+    rows = []
+    for bank_name, size, stream, mix_stream in (
+            ("assessment", overlay["assessment"]["samples"], streams[0], streams[3]),
+            ("delivery", 1, streams[1], streams[4])):
+        rng = np.random.default_rng(mix_stream)
+        # Independent private draws, once per episode, BEFORE physical availability.
+        theta_profiles = np.column_stack([rng.choice(gains, size=size, p=prob) for prob in (x, y)])
+        bank = draw_gain_bank(bank_name, size, stream, cleared.providers, paths)
+        for row, (theta1, theta2) in zip(bank, theta_profiles, strict=True):
+            row.update(theta_1=theta1, theta_2=theta2)
+        if bank_name == "assessment":
+            validation, timing = evaluate(bank)
+            result["holdout_timing"] = timing
+            audit = []
+            for player, differences in zip(players, deviation_gains(validation, x, y), strict=True):
+                for gain, samples in zip(gains, differences.T, strict=True):
+                    avg, se = float(samples.mean()), float(samples.std(ddof=1) / np.sqrt(size))
+                    audit.append(dict(provider_id=player, deviating_theta=gain, paired_gain_mw_h=avg,
+                                      paired_se_mw_h=se, simultaneous_upper_95_mw_h=avg +
+                                      t.ppf(1 - .05 / (2 * len(gains)), size-1) * se))
+            pd.DataFrame(audit).to_csv(output_dir / "holdout_deviations.csv", index=False)
+        elif overlay.get("disturbance_changes"):
+            # Optional prescribed stress delivery. Neither design nor holdout uses this override.
+            path_by_name["prescribed_delivery"] = dict(name="prescribed_delivery",
+                start_time_s=options["start_time_s"], power_deficit_mw=options["power_deficit_mw"],
+                changes=options["power_deficit_changes"])
+            bank[0]["path"] = "prescribed_delivery"
+        rows.extend(bank)
+    write_json(output_dir / "gain_equilibrium.json", result)
+    return rows, path_by_name, design_timing["integrations"] + result["holdout_timing"]["integrations"]
+
+
 def run_fpp_study(overlay_path: Path, output_dir: Path):
     from .experiment import prepare_experiment
     output_dir = output_dir.resolve()
@@ -156,6 +278,8 @@ def run_fpp_study(overlay_path: Path, output_dir: Path):
             output_dir / "disturbance_events.csv", index=False)
         schedules = make_dispatch_schedules(cleared, overlay["schedules"], scenario["final_time_s"])
         assessment_schedule = overlay.get("assessment_schedule", "constant")
+        constant_reference = all(np.array_equal(s.targets_mw,
+            np.broadcast_to(s.initial_operating_power_mw, s.targets_mw.shape)) for s in schedules.values())
         # Freeze all policy assignments and dispatch targets BEFORE drawing.
         assignments = {policy: {identity: ("fpp" if policy == "fpp" else "inactive")
                        if mode == "fi" and policy != "bilinear_fi" else mode
@@ -183,41 +307,57 @@ def run_fpp_study(overlay_path: Path, output_dir: Path):
             table.insert(0, "time_s", np.arange(len(table)) * 300)
             table.to_csv(output_dir / f"{name}_dispatch_targets.csv", index=False)
         seed = overlay["assessment"]["seed"]
-        streams = np.random.SeedSequence(seed).spawn(2)
-        rows = []
-        for bank, size, stream in (("assessment", overlay["assessment"]["samples"], streams[0]),
-                                    ("delivery", 1, streams[1])):
-            rng = np.random.default_rng(stream)
-            for sample in range(size):
-                rows.append(dict(bank=bank, sample=sample, **{
-                    p.provider_id: p.availability.sample_mw(rng) for p in cleared.providers}))
+        options = dict(power_deficit_mw=scenario["power_deficit_mw"], start_time_s=scenario["event_time_s"],
+            power_deficit_changes=changes, final_time_s=scenario["final_time_s"],
+            output_time_step_s=scenario["output_time_step_s"], maximum_solver_step_s=scenario["maximum_solver_step_s"],
+            fi_decision_interval_s=config["fi"]["decision_interval_s"], **overlay["numerics"],
+            provider_operating_power_mw=[p.operating_power_mw for p in cleared.providers],
+            measurement_times_s=np.arange(4, scenario["final_time_s"] + 1, SAMPLE_SECONDS))
+        game = overlay.get("game")
+        stream_ids = {"assessment": [0], "delivery": [1]}
+        gain_integrations = 0
+        if game:
+            rows, paths, gain_integrations = prepare_gain_study(output_dir, overlay, cleared, parameters,
+                                                               schedules[assessment_schedule], options)
+            stream_ids.update(design=[2], assessment_policy=[3], delivery_policy=[4])
+            delivery_path = paths[rows[-1]["path"]]
+            events = power_deficit_events(delivery_path["power_deficit_mw"], delivery_path["start_time_s"],
+                                         scenario["final_time_s"], delivery_path.get("changes", ()))
+            pd.DataFrame(events, columns=["time_s", "net_power_deficit_mw"]).to_csv(
+                output_dir / "disturbance_events.csv", index=False)
+        else:
+            streams = np.random.SeedSequence(seed).spawn(2)
+            rows = []
+            for bank, size, stream in (("assessment", overlay["assessment"]["samples"], streams[0]),
+                                        ("delivery", 1, streams[1])):
+                rng = np.random.default_rng(stream)
+                for sample in range(size):
+                    rows.append(dict(bank=bank, sample=sample, **{
+                        p.provider_id: p.availability.sample_mw(rng) for p in cleared.providers}))
         banks = pd.DataFrame(rows)
         banks.to_csv(output_dir / "availability_draws.csv", index=False)
         write_json(output_dir / "provenance.json", {
-            "seed": seed, "streams": {"assessment": [0], "delivery": [1]},
+            "seed": seed, "streams": stream_ids,
             "generator": "numpy.random.default_rng (PCG64)", "numpy_version": np.__version__,
-            "python_version": platform.python_version(), "profile": SOURCE_PROFILE,
+            "python_version": platform.python_version(), "profile": overlay["source_profile"],
             "base_config": str(base_path), "base_config_sha256": hashlib.sha256(base_path.read_bytes()).hexdigest(),
             "overlay_path": str(overlay_path.resolve()),
             "disturbance_changes": overlay.get("disturbance_changes", []),
             "draws_sha256": hashlib.sha256((output_dir / "availability_draws.csv").read_bytes()).hexdigest(),
-            "policies_selected_on_assessment": False, "initial_history": "nominal at -116,-112,...,0 seconds",
+            "policies_selected_on_assessment": False, "initial_history": "unused" if game else "nominal at -116,-112,...,0 seconds",
             "rocof": "unfiltered physical RHS, exact left/right limits of every event included; no smoothing window; maximum absolute on [0,H]",
             "metering_model": "solved_operating_power_plus_delivered_response",
+            "reference_model": ("constant_solved_operating_point" if constant_reference
+                                else "prescribed_dispatch_targets"),
             "dispatch_reference_role": "settlement_only; no tracking imposed on physical power",
             "assessment_schedule": assessment_schedule,
             "dispatch_targets_file": f"{assessment_schedule}_dispatch_targets.csv",
             "scope": "one aggregate area; exact synchronized model-output metering; FPP coefficients unless prices declared"})
-        options = dict(power_deficit_mw=scenario["power_deficit_mw"], start_time_s=scenario["event_time_s"],
-            power_deficit_changes=changes,
-            final_time_s=scenario["final_time_s"], output_time_step_s=scenario["output_time_step_s"],
-            maximum_solver_step_s=scenario["maximum_solver_step_s"],
-            fi_decision_interval_s=config["fi"]["decision_interval_s"], **overlay["numerics"],
-            provider_operating_power_mw=[p.operating_power_mw for p in cleared.providers],
-            measurement_times_s=np.arange(4, scenario["final_time_s"] + 1, SAMPLE_SECONDS))
         records, financial_rows, timings, checks, saturation_rows, all_accounts, all_directions = [], [], [], [], [], [], []
-        deliveries = {}
+        deliveries, reference_checks = {}, []
         for row in rows:
+            case_options = {**options, **path_options(paths[row["path"]])} if game else options
+            selected = dict(zip(game["players"], [row["theta_1"], row["theta_2"]])) if game else None
             draw = {p.provider_id: row[p.provider_id] for p in cleared.providers}
             block = realize_fcr_block(cleared, draw)
             for settlement in block.settlements:
@@ -227,17 +367,26 @@ def run_fpp_study(overlay_path: Path, output_dir: Path):
                     continue
                 for policy in POLICIES:
                     start_wall, start_cpu = perf_counter(), process_time()
-                    responses = policy_response_parameters(cleared, block, policy)
-                    trajectory = simulate_fcr_power_step(parameters, responses, dispatch_schedule=schedule, **options)
-                    metrics, saturation = summarize_fpp_benchmark(trajectory, schedule, scenario["event_time_s"])
+                    responses = policy_response_parameters(cleared, block, policy, gains=selected if policy == "fpp" else None)
+                    trajectory = simulate_fcr_power_step(parameters, responses, dispatch_schedule=schedule, **case_options)
+                    metrics, saturation = summarize_fpp_benchmark(trajectory, schedule, case_options["start_time_s"])
                     tags = {"bank": row["bank"], "sample": row["sample"], "schedule": name, "policy": policy}
+                    if name == "constant":
+                        references = schedule.reference_mw(trajectory.time_s)
+                        reference_error = float(np.max(abs(references - schedule.initial_operating_power_mw)))
+                        deviation_error = float(np.max(abs(trajectory.provider_active_power_mw
+                            - references - trajectory.provider_response_mw)))
+                        if reference_error != 0 or deviation_error > 1e-10:
+                            raise RuntimeError("constant ANDES reference or delivered-response deviation identity failed")
+                        reference_checks.append({**tags, "reference_max_error_mw": reference_error,
+                            "deviation_response_max_error_mw": deviation_error})
                     directory = output_dir / row["bank"] / f"sample_{row['sample']:03d}" / name / policy
                     directory.mkdir(parents=True, exist_ok=True)
                     # Every run retains total meter trajectories; settlement has no controller dependency.
                     save_trajectory(trajectory, schedule, directory)
                     if policy == "fpp":
                         settlement = settle_fpp(trajectory.time_s, trajectory.delta_frequency_hz,
-                                                 trajectory.provider_active_power_mw, schedule, prices)
+                                                 trajectory.provider_active_power_mw, schedule, prices, profile=overlay["source_profile"])
                         for table_name, table in settlement.items():
                             table.to_csv(directory / f"fpp_{table_name}.csv", index=False)
                         all_accounts.append(settlement["accounts"].assign(**tags))
@@ -252,18 +401,18 @@ def run_fpp_study(overlay_path: Path, output_dir: Path):
                     timings.append({**tags, "kind": "comparison", "wall_s": perf_counter() - start_wall,
                                     "cpu_s": process_time() - start_cpu})
                     if row["bank"] == "delivery":
-                        deliveries[name, policy] = (trajectory, responses)
+                        deliveries[name, policy] = (trajectory, responses, case_options)
                     print(f"FPP study: {row['bank']} {row['sample']} {name} {policy} complete", flush=True)
         # Tighter integration and denser output reuse the independent delivery draw.
         for policy in POLICIES:
-            coarse, responses = deliveries[assessment_schedule, policy]
+            coarse, responses, options = deliveries[assessment_schedule, policy]
             fine_options = {**options, "maximum_solver_step_s": options["maximum_solver_step_s"] / 2,
                 "output_time_step_s": options["output_time_step_s"] / 2,
                 "relative_tolerance": options["relative_tolerance"] / 10,
                 "absolute_tolerance": options["absolute_tolerance"] / 10}
             start_wall, start_cpu = perf_counter(), process_time()
             fine = simulate_fcr_power_step(parameters, responses, dispatch_schedule=schedules[assessment_schedule], **fine_options)
-            fine_metrics, _ = summarize_fpp_benchmark(fine, schedules[assessment_schedule], scenario["event_time_s"])
+            fine_metrics, _ = summarize_fpp_benchmark(fine, schedules[assessment_schedule], options["start_time_s"])
             indices = np.searchsorted(fine.time_s, coarse.time_s)
             # Exact grids are nested for the supplied overlay; diagnose incompatible numerical grids.
             if not np.allclose(fine.time_s[indices], coarse.time_s, rtol=0, atol=1e-10):
@@ -272,12 +421,12 @@ def run_fpp_study(overlay_path: Path, output_dir: Path):
                 response_max_diff_mw=float(np.max(abs(coarse.provider_response_mw - fine.provider_response_mw[indices]))),
                 integrated_error_diff_hz2_s=float(abs(coarse.integrated_squared_frequency_error_hz2_s[-1]
                                                       - fine.integrated_squared_frequency_error_hz2_s[-1])))
-            coarse_metrics, _ = summarize_fpp_benchmark(coarse, schedules[assessment_schedule], scenario["event_time_s"])
+            coarse_metrics, _ = summarize_fpp_benchmark(coarse, schedules[assessment_schedule], options["start_time_s"])
             for metric in ("nadir_sampled_hz", "zenith_sampled_hz", "rocof_max_abs_hz_per_s", "switched_activation_cost_eur", "fi_net_settlement_eur"):
                 check[metric + "_difference"] = abs(coarse_metrics[metric] - fine_metrics[metric])
             if policy == "fpp":
                 a, b = [settle_fpp(t.time_s, t.delta_frequency_hz, t.provider_active_power_mw,
-                                    schedules[assessment_schedule], prices) for t in (coarse, fine)]
+                                    schedules[assessment_schedule], prices, profile=overlay["source_profile"]) for t in (coarse, fine)]
                 check["coefficient_max_diff_mw_h"] = float(np.max(abs(a["accounts"].coefficient_mw_h - b["accounts"].coefficient_mw_h)))
                 check["rcr_max_diff_mw"] = float(np.max(abs(a["directions"].rcr_mw - b["directions"].rcr_mw)))
                 if check["coefficient_max_diff_mw_h"] > 1e-6 or check["rcr_max_diff_mw"] > 1e-5:
@@ -315,16 +464,21 @@ def run_fpp_study(overlay_path: Path, output_dir: Path):
                     meter_max_diff_mw=meter_difference, deviation_change_identity_error_mw=deviation_error))
         for filename, table in (("metrics", pd.DataFrame(records)), ("saturation", pd.DataFrame(saturation_rows)),
                                 ("fcr_block_accounting", pd.DataFrame(financial_rows)), ("timings", pd.DataFrame(timings)),
-                                ("numerical_checks", pd.DataFrame(checks)), ("ramp_checks", pd.DataFrame(ramp_checks)),
+                                ("numerical_checks", pd.DataFrame(checks)),
+                                ("reference_checks", pd.DataFrame(reference_checks)),
                                 ("fpp_accounts", pd.concat(all_accounts, ignore_index=True)),
                                 ("fpp_directions", pd.concat(all_directions, ignore_index=True))):
             table.to_csv(output_dir / f"{filename}.csv", index=False)
+        if ramp_checks:
+            pd.DataFrame(ramp_checks).to_csv(output_dir / "ramp_checks.csv", index=False)
         write_json(output_dir / "verification.json", {"solver_success": True, "response_bounds": True,
-            "total_power_limits": True, "schedule_full_support_headroom": True, "balanced_ramps": True,
+            "total_power_limits": True, "schedule_full_support_headroom": True,
+            "constant_reference": constant_reference, "constant_reference_checks": True,
+            "reference_comparisons": len(ramp_checks),
             "numerical_refinement": True, "residual_ledger_balance": True,
             "metering_model": "solved_operating_power_plus_delivered_response",
-            "assessment_samples": len(banks[banks.bank == "assessment"]), "integrations": len(timings)})
-        write_json(output_dir / "study_status.json", {"status": "complete", "integrations": len(timings),
+            "assessment_samples": len(banks[banks.bank == "assessment"]), "integrations": len(timings) + gain_integrations})
+        write_json(output_dir / "study_status.json", {"status": "complete", "integrations": len(timings) + gain_integrations,
             "simulation_and_export_wall_s": perf_counter() - wall_start,
             "simulation_and_export_cpu_s": process_time() - cpu_start})
         run_fpp_report(output_dir)
@@ -348,11 +502,47 @@ def run_fpp_report(output_dir: Path):
     paired.to_csv(output_dir / "paired_differences.csv", index=False)
     accounts = pd.read_csv(output_dir / "fpp_accounts.csv")
     directions = pd.read_csv(output_dir / "fpp_directions.csv")
-    plot_fpp_comparison(output_dir, metrics, summary, accounts, schedule=assessment_schedule)
+    plot_fpp_comparison(output_dir, metrics, summary, accounts, schedule=assessment_schedule,
+                        gain_game="game" in overlay)
     save_reversal_diagnostics(output_dir, schedule=assessment_schedule)
-    write_fpp_analysis(output_dir, metrics, summary, paired, accounts, directions, status)
+    if "game" in overlay:
+        write_gain_analysis(output_dir, summary, status)
+    else:
+        write_fpp_analysis(output_dir, metrics, summary, paired, accounts, directions, status)
     write_json(output_dir / "report_status.json", {"status": "complete", "integrations": 0,
                                                   "wall_s": perf_counter() - start})
+
+
+def write_gain_analysis(output_dir, summary, status):
+    result = json.loads((output_dir / "gain_equilibrium.json").read_text(encoding="utf-8"))
+    draw = pd.read_csv(output_dir / "availability_draws.csv").query("bank == 'delivery'").iloc[0]
+    lines = ["# FPP gain selection on matched scenarios", "",
+        "Each design case supplies the same availability vector and disturbance to every gain pair. "
+        "The private score is the sum of the raise and lower settlement coefficients in MW h. "
+        "All metered units and the accounting residual settle with the raw negative frequency error.", "",
+        f"The design table selected a {result['kind']} equilibrium within the catalogue {result['catalogue']}. "
+        "Each follower applies its episode gain to the current frequency at 0.1 s intervals.", "",
+        "| Player | Design probabilities in catalogue order | Design deviation gain [MW h] | Delivery gain |",
+        "|---|---|---:|---:|"]
+    for i, identity in enumerate(result["players"]):
+        lines.append(f"| {identity} | {result['probabilities'][identity]} | "
+                     f"{result['design_gaps_mw_h'][i]:.6g} | {draw[f'theta_{i+1}']:.6g} |")
+    lines += ["", f"The representative delivery used the {draw['path']} disturbance path. "
+        "The independent holdout evaluates every unilateral gain against the frozen opponent mixture. "
+        "holdout_deviations.csv gives paired mean gains, standard errors and approximate simultaneous "
+        "one-sided 95% Bonferroni t limits. The design equilibrium describes the sampled finite game.", "",
+        "| Policy | Mean nadir [Hz] | Mean terminal error [Hz] | Mean integrated error [Hz² s] | Mean max absolute RoCoF [Hz/s] |",
+        "|---|---:|---:|---:|---:|"]
+    for policy in POLICIES:
+        means = summary[summary.policy == policy].set_index("metric")["mean"]
+        values = means.loc[["nadir_sampled_hz", "terminal_error_hz", "frequency_error_hz2_s", "rocof_max_abs_hz_per_s"]]
+        lines.append(f"| {policy} | " + " | ".join(f"{v:.8g}" for v in values) + " |")
+    lines += ["", "RoCoF is the unfiltered model derivative in Hz/s, including exact event limits, "
+        "with no averaging window. The statistic is maximum absolute RoCoF over the simulated horizon.", "",
+        f"The study used {status['integrations']} integrations in {status['simulation_and_export_wall_s']:.2f} s. "
+        "gain_equilibrium.json records design and holdout timings. The assessment and delivery metrics "
+        "use fresh cases after policy selection. Prices and activation costs are separate from gain selection."]
+    (output_dir / "ANALYSIS.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def save_reversal_diagnostics(output_dir, schedule="constant"):
@@ -400,6 +590,7 @@ def write_fpp_analysis(output_dir, metrics, summary, paired, accounts, direction
     assessment_schedule = overlay.get("assessment_schedule", "constant")
     provenance = json.loads((output_dir / "provenance.json").read_text(encoding="utf-8"))
     actual_meter = provenance.get("metering_model") == "solved_operating_power_plus_delivered_response"
+    constant_reference = provenance.get("reference_model") == "constant_solved_operating_point"
     changes = overlay.get("disturbance_changes", [])
     events = [(config["scenario"]["event_time_s"], config["scenario"]["power_deficit_mw"])]
     events += [(r["time_s"], r["net_power_deficit_mw"]) for r in changes]
@@ -408,12 +599,20 @@ def write_fpp_analysis(output_dir, metrics, summary, paired, accounts, direction
         "Meters read the actual aggregate-model output P_i,0 + u_i(t), with u_i the numerically "
         "integrated delivered response (z_i for FI/FPP). They are not constructed from DT or the "
         "dispatch reference. No dispatch-tracking dynamics or artificial tracking error are added. "
-        "Settlement computes d_i = P_i^meter - ref_i, including any failure to follow the prescribed "
-        "reference. Changing DT alone cannot change frequency, RoCoF or actual output."
+        "The reference is used only in settlement: d_i = P_i^meter - ref_i."
         if actual_meter else
         "Historical run: metered power was constructed as reference plus response, imposing ideal "
         "schedule tracking. These saved results retain that older convention; report regeneration "
         "does not convert them to actual-output metering.")
+    reference_description = (
+        "Every generator's reference is its solved ANDES P_i,0 throughout the horizon. "
+        "No endpoint offsets or reference ramps are prescribed. With actual power P_i,0 + u_i(t), "
+        "the settlement deviation is d_i(t) = u_i(t), the delivered response. The same reference "
+        "applies to assessment and independent delivery."
+        if constant_reference else
+        f"The saved assessment and representative-result reference is `{assessment_schedule}`. "
+        "DT values are prescribed scenario inputs. The initial row is the solved ANDES operating "
+        "point; the 300 s endpoint is a settlement reference, not a claim that physical output reaches it.")
     lines = ["# AEMO-inspired FPP fixed-policy benchmark", "",
         "The same solved five-provider fi_endogenous fleet, prescribed disturbance and FCR clearing are used "
         "for all policies. Every event is recomputed over [0,300] s. No optimizer or policy selection "
@@ -424,11 +623,8 @@ def write_fpp_analysis(output_dir, metrics, summary, paired, accounts, direction
         "availability and decision clocks carry through every change. Event times and magnitudes "
         "are declared scenario assumptions, selected before the runs.", "",
         "## Metering and dispatch reference", "", meter_description, "",
-        f"The predeclared assessment and representative-result reference is `{assessment_schedule}`. "
-        "DT values are scenario inputs, not a dispatch optimization. How to select future DT values "
-        "remains open. The initial row is the solved ANDES operating point. The 300 s endpoint "
-        "is a target, not a claim that physical output reaches it.", "",
-        "| Provider | Initial DT [MW] | DT at 300 s [MW] |", "|---|---:|---:|",
+        reference_description, "",
+        "| Provider | Reference at 0 s [MW] | Reference at 300 s [MW] |", "|---|---:|---:|",
         *[f"| {identity} | {targets.iloc[0][identity]:.9f} | {targets.iloc[1][identity]:.9f} |"
           for targets in [pd.read_csv(output_dir / f"{assessment_schedule}_dispatch_targets.csv")]
           for identity in targets.columns if identity != "time_s"], "",
@@ -555,15 +751,16 @@ def write_fpp_analysis(output_dir, metrics, summary, paired, accounts, direction
         "or cost recovery are outside this implementation.", "",
         "## Representative delivery and reference check", "",
         "The figures use an independent delivery stream where labelled; they are separate from "
-        "assessment statistics. The C1 +1 MW / C2 -1 MW reference ramp preserves scheduled total "
-        "generation and both headroom margins. See ramp_checks.csv for comparisons against the "
-        "constant reference on the same draw. " + meter_description, "",
+        "assessment statistics. " + (
+        "See reference_checks.csv for each trajectory's constant-P_i,0 and d_i=u_i identity checks. "
+        if constant_reference else
+        "Historical reference sensitivities, where present, are saved in ramp_checks.csv. ")
+        + reference_description, "",
         "- delivery_frequency.png: physical frequency, FM and model RoCoF.",
-        "- delivery_responses_schedule.png: control, individual delivery and balanced schedule.",
+        "- delivery_responses_schedule.png: control, individual delivery and settlement reference.",
         "- assessment_comparison.png: assessment means and pointwise uncertainty.",
         "- fpp_settlement_coefficients.png: signed representative coefficients with residual.", "",
         "## Reproduction, timings and scope", "", "```powershell",
-        f".\\.venv\\Scripts\\python.exe scripts\\run_fcr.py --fpp-benchmark --config {Path(provenance['overlay_path']).as_posix()} --output-dir results/{output_dir.name}_replay",
         f".\\.venv\\Scripts\\python.exe scripts\\run_fcr.py --fpp-report results/{output_dir.name}", "```", "",
         f"Completed {status['integrations']} integrations, including three tighter checks. "
         f"Simulation/export wall time {status['simulation_and_export_wall_s']:.3f} s; "

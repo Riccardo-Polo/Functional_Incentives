@@ -1,5 +1,80 @@
 # AEMO-inspired FPP benchmark
 
+## Current two-provider gain game
+
+The maintained command selects the two renewable followers' gain policies
+before delivery. The FPP-specific preset declares fixed FCR offers of 4 MW
+from each conventional provider at 15, 18 and 24 EUR/MW per block. Both
+renewables submit zero FCR offers. Clearing supplies 12 MW and fixes the roles
+before availability is sampled. The catalogue is `[0, 0.5, 1, 1.5, 2]`.
+Costs and optional monetary settlements remain separate accounting outputs.
+
+```powershell
+.\.venv\Scripts\python.exe scripts/run_fcr.py --fpp-benchmark --config configs/aemo_fpp_metered.toml --output-dir results/fpp_gain_game
+.\.venv\Scripts\python.exe scripts/run_fcr.py --fpp-report results/fpp_gain_game
+```
+
+For each candidate pair the plant starts at the same solved point and reuses
+every provider availability and the entire disturbance path of the design case.
+Both controllers react to the resulting common frequency. At tick k a provider
+computes `clip(-theta * K * db(e_k), -A, A)`, then holds the target for 0.1 s.
+The score is the sum of its two signed CF × RCR / 12 coefficients in MW h.
+Ideal FM equals minus the measured frequency error at each 4 s sample. Every
+finite sample enters its direction directly. Empty directions have zero scores,
+RCR and coefficients. The accounting residual closes each directional ledger.
+
+The two private mean-score tables are evaluated by columns for player 1 and
+by rows for player 2. The selector chooses the first pure mutual best response
+in ascending catalogue order, using a numerical tolerance of 1e-10 MW h.
+When no pure profile qualifies it enumerates supports, solves linear feasibility
+problems for independent mixtures, and verifies the two deviation gaps.
+A mixed policy draws one gain per player per episode, before that episode's
+availability, and retains it for the horizon.
+
+The equally likely disturbance paths and samples are configurable in
+`configs/fpp_followers.toml`. These paths are a synthetic prior. Controllers
+observe their own capacity and current frequency. Seed children 0, 1 and 2
+supply assessment, delivery and design cases respectively. Children 3 and 4
+select episode gains for assessment and delivery. `design_scenarios.csv`
+and `availability_draws.csv` record the full draws and path IDs.
+`{design,assessment}_gain_scores.csv` record each paired score and the matching
+`*_gain_payoffs.csv` give the two mean tables. `gain_equilibrium.json` stores
+the frozen distributions, pure candidates, numerical gaps, and separate training
+and holdout timings. `holdout_deviations.csv` retains paired gains and uncertainty
+for every unilateral deviation on fresh cases. The design equilibrium applies
+to the finite catalogue and design bank. The representative realization and
+holdout uncertainty have separate interpretations.
+
+The default counts give 200 design and 200 holdout profile evaluations, then 27
+comparison integrations and three numerical refinements. An entirely undisturbed
+design or holdout case has exactly zero score for every profile at the solved
+equilibrium. These cases are counted in the averages and recorded separately
+from numerical integrations. Each comparison uses
+the same physical draw for FCR, FI and FPP. A prescribed reversal, if present,
+overrides only the delivery path. Saved legacy overlays with the historical
+source profile retain continuous fixed droop and the original FM rules.
+
+### Paired comparison with the previous follower
+
+Use a completed gain study as the source and a separate new directory for the
+controller comparison. The command loads the frozen episode gains and the
+independent delivery availability vector. Both test cases start with +10 MW at
+1 s. One continues to 300 s and the other switches to -7 MW at 120.05 s. Each
+300 s trajectory is evaluated for the historical continuous droop, sampled
+unit gain, and selected gains. All three use the same ideal measurement profile,
+constant ANDES references, FCR awards and physical bounds. The intermediate
+unit-gain case separates sampling effects from gain selection. The command
+runs serially, refines all six trajectories, and writes the paired metrics,
+scores, figures and ANALYSIS.md.
+
+```powershell
+.\.venv\Scripts\python.exe scripts/run_fcr.py --fpp-compare-controllers results/fpp_gain_game --output-dir results/fpp_controller_comparison
+```
+
+## Historical fixed-policy benchmark
+
+The following sections document the saved studies from 26-29 October. Their original experiment commands refer to the configuration at that revision. Use the command above for a new gain-game study and `--fpp-report STUDY_DIR` to read a completed historical study.
+
 Implemented 26 October 2026. This opt-in benchmark compares FCR alone, the
 existing bilinear FI contract with explicit gamma=50, and a causal fixed-droop
 FPP controller. It uses the existing five-provider `fi_endogenous` configuration,
@@ -8,17 +83,18 @@ provider identities, inertia, limits, gains, response times and availability law
 The comparison changes the complete policy (controller plus payment mechanism);
 it does not identify a behavioural effect of payment design alone.
 
-**Current metering revision (27 October 2026):** meters now read the actual
-model output, solved P_i,0 plus numerically delivered response. The former
-reference-plus-response construction imposed ideal schedule tracking and has
-been removed. The current study uses `configs/aemo_fpp_metered.toml` and
-`results/aemo_fpp_metered/`; historical outputs remain unchanged. The same
-10 MW deficit and availability draws are retained. The prescribed endpoint
-reference reallocates 1 MW from C2 to C1, without commanding the physical model.
+**Current reference revision (29 October 2026, D-034):** every generator uses
+its solved ANDES P_i,0 as a constant settlement reference for the whole horizon.
+Meters retain actual model output P_i,0 plus numerically delivered response,
+so settlement deviation equals delivered response. All maintained FPP presets
+use this reference for assessment and delivery; the previous C1/C2 endpoint
+reallocation is removed. New outputs use `results/aemo_fpp_constant/`.
+Historical studies, including `results/aemo_fpp_metered/`, remain unchanged.
+The 27 October actual-output metering correction remains in force.
 
 ```powershell
-.\.venv\Scripts\python.exe scripts/run_fcr.py --fpp-benchmark --config configs/aemo_fpp_metered.toml --output-dir results/aemo_fpp_metered
-.\.venv\Scripts\python.exe scripts/run_fcr.py --fpp-report results/aemo_fpp_metered
+.\.venv\Scripts\python.exe scripts/run_fcr.py --fpp-benchmark --config configs/aemo_fpp_metered.toml --output-dir results/aemo_fpp_constant
+.\.venv\Scripts\python.exe scripts/run_fcr.py --fpp-report results/aemo_fpp_constant
 ```
 
 ## Commands and outputs
@@ -68,18 +144,24 @@ On restricted Windows hosts, set `TEMP` and `TMP` to an existing writable
 `results/test_tmp` directory for the file-writing tests.
 
 The overlay selects a base scenario and changes horizon/numerical settings.
-Its optional prescribed disturbance changes, schedules and prices are separate
-inputs; source constants are not knobs.
+Its optional prescribed disturbance changes and prices are separate inputs;
+source constants are not knobs. Omitting `schedules` and `assessment_schedule`
+resolves to the constant solved-power reference. Explicit historical schedule
+overrides remain supported for reproduction, and report-only mode reads saved
+overlays rather than applying the new default to old results.
 Policies and schedules are frozen before sampling. Eight assessment draws use
 NumPy SeedSequence(20261026), child 0; an independent representative delivery uses
 child 1. All policies reuse each draw. No optimization, sweep, assessment-based
-selection or resampling for ramps is performed. Each trajectory lasts 300 seconds;
+selection is performed. Each trajectory lasts 300 seconds;
 historical 40-second payments are not used in the comparison.
 
 New outputs include resolved inputs, offers/awards, solved powers, original and
 replacement assignments, exact draws and provenance, all meter/response
 trajectories, per-provider saturation, block accounting, per-run timings,
 refinement checks, paired statistics, four figures and `ANALYSIS.md`.
+`reference_checks.csv` verifies constant P_i,0 and deviation=response on every
+saved constant-reference trajectory. The standard study uses 30 integrations:
+24 assessment, three independent delivery and three numerical refinements.
 For FPP runs, `fpp_samples.csv`, `fpp_filter_history.csv`, `fpp_directions.csv`
 and `fpp_accounts.csv` preserve the settlement intermediate quantities.
 
@@ -102,8 +184,8 @@ that every current Australian implementation detail is reproduced.
 |---|---|
 | Fixed source profile | 4 s samples, 300 s intervals, 75 counted samples; alpha=2/9; preceding 30 history samples; at least seven directional FM values and a strict 0.01 Hz amplitude crossing; performance misalignment outside +/-0.015 Hz |
 | Existing physical/economic inputs | Solved powers and identities, MVA/droop power bases, online synchronous inertia, active-power limits, K, T, bounded Gaussian laws, FCR offers/awards/costs; gamma=50 and rho=1 for the switched provider in this scenario |
-| External scenario data | Prescribed dispatch targets, optional signed net-deficit changes, and optional separate raise/lower hourly regulation prices with source/date/currency/scope/evidence metadata |
-| Explicit adaptations | Single area; every modelled unit uses scheduled/semi-scheduled reference; exact synchronized metering of model output; nominal initial prehistory; retained FCR market; fixed-droop FPP follower with 0.015 Hz deadband at 60 Hz; NULL factors retained without historical substitution; valid zero performance maps to CF=0 |
+| External scenario data | Optional signed net-deficit changes and separate raise/lower hourly regulation prices with source/date/currency/scope/evidence metadata; prescribed dispatch targets only for historical replay |
+| Explicit adaptations | Single area; constant solved ANDES P_i,0 reference for every unit; exact synchronized metering of model output; nominal initial prehistory; retained FCR market; fixed-droop FPP follower with 0.015 Hz deadband at 60 Hz; NULL factors retained without historical substitution; valid zero performance maps to CF=0 |
 | Numerical settings | 8 matched draws plus independent delivery; seed 20261026; output step 0.05 s; maximum RK45 step 0.1 s; rtol=1e-11, atol=1e-13; refinement halves both steps and divides tolerances by ten |
 
 ## Physical control and dispatch
@@ -135,51 +217,42 @@ including FCR providers, enter its accounting without receiving extra controls.
 FCR offers do not anticipate FPP income. The accepted TSO objective and optimizer
 remain specific to bilinear FI.
 
-With boundary targets fixed before the event, use linear interpolation:
+The current reference is fixed before the event at the solved operating point:
 
 $$
-\operatorname{ref}_i[n]=DT_{i,j-1}+\frac{n}{75}(DT_{i,j}-DT_{i,j-1}),\quad
-n=1,\ldots,75.
+\operatorname{ref}_i(t)=P_{i,0}\quad\text{for all }t\in[0,H].
 $$
 
-The continuous reference uses the same straight line. The first target is the
-actual solved ANDES P_i,0. The meter reads the physical simulation output:
+This uses each provider's solved active power, including the ANDES slack
+solution, matched by provider identity. The meter reads physical model output:
 
 $$P_i^{\mathrm{meter}}(t)=P_{i,0}+u_i(t),\qquad
-d_i(t)=P_i^{\mathrm{meter}}(t)-\operatorname{ref}_i(t).$$
+d_i(t)=P_i^{\mathrm{meter}}(t)-\operatorname{ref}_i(t)=u_i(t).$$
 
 Here u_i is delivered response, including the state named z_i for FI/FPP, not
-the requested target. DT never enters the meter construction. No dispatch
-tracking controller, noise or artificial tracking-error signal is added.
-For a constant reference equal to P_i,0, d_i equals response as an algebraic
-consequence. For a changing reference it also includes any shortfall or excess
-against the prescribed schedule. The constant and changing references yield
-identical frequency, RoCoF and actual power on matched draws; FPP scoring can
-differ. This is a reference sensitivity, not a simulated physical redispatch.
+the requested target. No dispatch tracking controller, noise or artificial
+tracking-error signal is added. The reference simplification affects settlement
+accounting; frequency, RoCoF and actual delivered power retain the same dynamics.
 
-The current first interval is (0,300] s, with these declared targets:
+The current first interval is (0,300] s, with these constant references:
 
-| Provider | DT_i,0 at 0 s [MW] | DT_i,1 at 300 s [MW] | Physical role in FPP case | FPP settlement |
+| Provider | Reference at 0 s [MW] | Reference at 300 s [MW] | Physical role in FPP case | FPP settlement |
 |---|---:|---:|---|---|
-| Conventional 1 | 260 | 261 | Original FCR controller | Included |
-| Conventional 2 | 310 | 309 | Original FCR controller | Included |
+| Conventional 1 | 260 | 260 | Original FCR controller | Included |
+| Conventional 2 | 310 | 310 | Original FCR controller | Included |
 | Conventional 3 | 250.906095586 | 250.906095586 | Original FCR controller | Included |
 | Reliable renewable | 90 | 90 | Original FCR controller | Included |
 | Uncertain renewable | 90 | 90 | Fixed-droop FPP follower replacing FI | Included |
 
-The small, balanced 1 MW reallocation respects both headroom margins and leaves
-scheduled total generation fixed. It is a prescribed scenario choice, not a
-calibrated or optimized dispatch. Selecting DT from an energy dispatch model
-remains open; no claim is made that actual power reaches DT_i,1. The residual is
-an additional accounting entry, not a sixth generator. Settlement participation
+No endpoint dispatch choice is required for the current model. The residual
+is an additional accounting entry, not a sixth generator. Settlement participation
 is exported separately from controller assignments in `fpp_participants.csv`.
 
-The overlay's optional `assessment_schedule` selects a declared reference
-before drawing (default `constant` for the original configuration). The current
-overlay selects `balanced_ramp` for all eight assessment draws and the primary
-delivery figures. Constant-reference delivery runs are retained as a check.
-Report-only mode reads the saved choice and metering provenance; historical
-reports keep their historical metering interpretation.
+Historical studies used linear interpolation between prescribed DT knots,
+including C1 260 -> 261 MW and C2 310 -> 309 MW. The generic `DispatchSchedule`
+and explicit overlay fields remain available for those historical reproductions.
+Their saved metering provenance and reference choice govern report regeneration;
+they are not silently reinterpreted as constant-reference results.
 
 Every boundary target must preserve both margins for the **entire unchanged
 availability support**, not just the realized draw. Every segment is balanced:
@@ -278,9 +351,37 @@ detailed telemetry recovery, participant allocation of residual, optimized droop
 strategic equilibrium, energy limits and secondary restoration. No frequency
 security threshold or new TSO objective is introduced.
 
-## Next research step: FPP provider optimization
+## Historical supervisor design discussion (29 October)
 
-The next requested task is to optimize an FPP provider's behavior. The current
+Supervisor discussion, 29 October 2026 (D-035): focus the next design on
+redistribution from harmful to helpful contributions and a tractable provider
+optimization. The present FI provider optimizes its response while the FPP
+follower uses prescribed droop. This asymmetry prevents interpreting their
+comparison as a fair comparison of equally optimized incentive mechanisms.
+
+The meeting suggested simplifying operational measurement heuristics in the
+ideal, noise-free model, potentially including FM filtering. This is a research
+direction, not a change to the implemented source profile. Filtering also
+changes temporal weighting and signal memory even without noise, so removing
+it requires an explicit settlement decision and checks of the retained
+redistribution property. Only the constant reference is implemented now.
+
+Questions to resolve before selecting a simplified game or optimization:
+
+- If every physical provider is helpful, who funds the rewards? Distinguish
+  budget balance over the physical providers from balance including the current
+  accounting residual; residual allocation is not implemented.
+- If only one or two providers are harmful, how concentrated are the charges,
+  and how do their magnitudes depend on normalization, RCR and prices? Do not
+  assume a large charge follows solely from having few harmful providers.
+- How can a provider act with causal, limited information about others? Unknown
+  realized actions need not be known in advance to define a best response under
+  declared beliefs, forecasts or a strategy model. None is adopted yet.
+- Is a tractable Nash equilibrium available after explicitly justified
+  simplifications? Specify players, strategies, information and payoffs first;
+  existence, uniqueness and computability are open, not assumed.
+
+The subsequent task was to optimize an FPP provider's behavior. The current
 `--fpp-benchmark` is a fixed-policy comparison: the uncertain renewable uses
 the prescribed deadband droop follower, while all five generators participate
 in FPP settlement. It supplies no FPP price in the main study and therefore
@@ -297,8 +398,8 @@ Before implementing the provider problem, decide and document:
   contribution factor and RCR;
 - the objective, horizon and accounting units, including directional FPP price
   provenance, currency, activation cost and any retained FCR or energy cash flow;
-- whether dispatch targets remain exogenous settlement references or are
-  selected by a separately specified energy-dispatch model;
+- how the transfer ledger is closed, including all-helpful/all-zero cases and
+  concentrated charges, while retaining the constant P_i,0 reference;
 - a frozen-policy evaluation on matched draws and an independent holdout,
   with physical frequency metrics including RoCoF and auditable settlement.
 
@@ -308,6 +409,15 @@ The [work plan](NEXT_STEPS.md#3-current-next-increment-fpp-provider-optimization
 sets out the proposed implementation sequence.
 
 ## Verification
+
+The 29 October constant-reference run completed 30 integrations, including
+three numerical refinements; all 108 tests passed. All 27 matched physical
+trajectories (frequency, RoCoF and actual power) reproduce the previous metered
+study exactly. Reference error is zero; exported deviation=response error is
+at most 2.89e-14 MW. The original constant-reference settlement coefficients
+also reproduce. `results/aemo_fpp_constant/change_audit.json` records these
+checks, 530 unchanged historical files, and report-only regeneration with zero
+integrations and preserved scientific data. Four figures were visually checked.
 
 Tests stay within the five existing test files. They cover source interpolation,
 endpoint ownership, balanced ramps and headroom, synthetic meters, helpful/harmful

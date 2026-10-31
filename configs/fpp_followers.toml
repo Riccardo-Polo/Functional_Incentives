@@ -1,0 +1,24 @@
+# Illustrative FPP-only experiment. Both renewables receive zero FCR awards.
+# The three conventional offers cover the existing 12 MW requirement.
+[fleet.decision]
+mode = "fixed"
+
+[fleet.providers]
+conventional_1 = { fixed_offer_mw = 4, fixed_bid_eur_per_mw_block = 15 }
+conventional_2 = { fixed_offer_mw = 4, fixed_bid_eur_per_mw_block = 18 }
+conventional_3 = { fixed_offer_mw = 4, fixed_bid_eur_per_mw_block = 24 }
+renewable_reliable = { fixed_offer_mw = 0, fixed_bid_eur_per_mw_block = 0, participation = "fcr_or_fi", fi_gamma_eur_per_hz_mw_s = 50, fi_rho_eur_per_mw2_s = 1 }
+renewable_uncertain = { fixed_offer_mw = 0, fixed_bid_eur_per_mw_block = 0, participation = "fcr_or_fi", fi_gamma_eur_per_hz_mw_s = 50, fi_rho_eur_per_mw2_s = 1 }
+
+[game]
+players = ["renewable_reliable", "renewable_uncertain"]
+gains = [0, 0.5, 1, 1.5, 2]
+design_samples = 8
+# Draw one unannounced path uniformly per episode, independently of availability.
+# These synthetic cases define the experiment's prior, not a disturbance forecast.
+paths = [
+  { name = "no_event", start_time_s = 0, power_deficit_mw = 0 },
+  { name = "moderate_deficit", start_time_s = 40, power_deficit_mw = 5 },
+  { name = "larger_deficit", start_time_s = 20, power_deficit_mw = 8 },
+  { name = "reversal", start_time_s = 1, power_deficit_mw = 10, changes = [[120.05, -7]] },
+]
