@@ -1,12 +1,12 @@
 # Actual model-output metering with a constant solved ANDES operating-point reference.
 base_config = "fcr.toml"
 scenario_name = "fi_endogenous"
-source_profile = "ideal_frequency_gain_game"
+source_profile = "ideal_frequency_net_profit"
 follower_config = "fpp_followers.toml"
 
 [scenario]
 final_time_s = 300.0
-output_time_step_s = 0.05
+output_time_step_s = 0.0125
 maximum_solver_step_s = 0.1
 
 [numerics]
@@ -20,4 +20,4 @@ seed = 20261026
 # Reference defaults to each generator's solved ANDES P_i,0 for the whole horizon.
 # No endpoint targets or reference ramps are prescribed.
 
-# No regulation prices are supplied. FPP outputs remain MW h coefficients.
+# Explicit illustrative EUR prices are inherited from fpp_followers.toml.

@@ -36,9 +36,27 @@ disturbance paths. Each path supplies a start time and initial deficit. Optional
 changes replace the absolute deficit level. Assessment sample count and the root
 seed come from the main overlay. All settings are illustrative experiment inputs.
 
-Run `--fpp-benchmark --config configs/aemo_fpp_metered.toml --output-dir results/fpp_gain_game`
-in a new directory. The controller interval is 0.1 s, settlement sampling is 4 s
-and the reference is the solved ANDES operating point. Design, assessment and
+`game.prices` declares explicit EUR raise/lower prices and their provenance.
+The current values are both 12 EUR/(MW h), synthetic and uncalibrated. This
+scenario benchmark is twice the current preset FCR hourly scale (24/4=6),
+as a declared activated-service premium, not a product-pricing identity.
+`game.activation_cost` requires `source` and a `quadratic_eur_per_mw2_h` map
+with exactly the two player IDs. Both values are 50 EUR/(MW² h). The loader
+converts rho=k/3600=1/72 EUR/(MW² s) into the existing provider field exactly
+once; an explicit per-second rho in the same follower setup is rejected.
+The payoff subtracts each player's live integrated `rho*z^2/2` activation cost.
+The same converted resource cost applies to FI and FPP in this paired preset.
+At 1 MW for five minutes, the activation cost is 2.083333 EUR; the earlier
+rho=1 per-second assumption implied 150 EUR. AUD game prices are
+rejected because these costs are in EUR. Design and delivery use the same prices.
+
+Run `--fpp-benchmark --config configs/aemo_fpp_metered.toml --output-dir results/fpp_economic_benchmark`
+in a new directory. The controller interval is 0.1 s; ideal settlement uses
+the full numerical trajectory (current output step 0.0125 s, halved in delivery
+refinement) with time-weighted quadrature and no four-second
+measurement clock. The reference is the solved ANDES operating point. The
+profile is `ideal_frequency_net_profit`; the old `ideal_frequency_gain_game`
+and AEMO source profiles remain for historical replay. Design, assessment and
 delivery are separate streams. The optional reversal overlay prescribes only
 the representative delivery path. See [AEMO_FPP.md](AEMO_FPP.md) for the score,
 selection rules and saved tables.

@@ -1,8 +1,8 @@
 # Current frequency-control model
 
-Updated 2026-10-31. The [FPP study](AEMO_FPP.md) selects an ex-ante gain
+Updated 2026-11-06. The [FPP study](AEMO_FPP.md) selects an ex-ante gain
 for each of two zero-award renewable followers by comparing private mean
-raise-plus-lower FPP coefficients over identical design scenarios. Each provider
+priced raise-plus-lower settlement minus internal activation cost over identical design scenarios. Each provider
 then computes a deadband-droop target from the present frequency every 0.1 s,
 clips it to its own realized availability and holds it until the next tick.
 The plant integrates delivered response through its existing first-order lag.
@@ -574,6 +574,32 @@ Statistics compose J per draw, preserving error/payment covariance. Tighter
 integration checks retain the same design draws and provider decision clock.
 No future delivery realization informs the TSO choice. Gamma remains constant
 over H, and repeated contracts remain a separate unimplemented extension.
+
+## Cost-aware ideal FPP gain selection (D-039/D-040)
+
+The two FPP followers retain their causal 0.1 s held-target feedback law and
+episode gains theta. Each selects its gain against the other player's policy
+using mean monetary settlement minus `rho_i/2 * integral z_i(t)^2 dt`, in EUR.
+This is the same quadratic activation cost as FI and uses delivered power in
+the live numerical ledger. The maintained synthetic directional prices are
+both 12 EUR/(MW h); the hourly quadratic cost coefficient is k=50
+EUR/(MW² h) for both renewable players, converted once to rho=k/3600=1/72
+EUR/(MW² s). The cost rate is k*z²/2 EUR/hour; at 1 MW this gives marginal
+cost 50 EUR/MWh and five-minute cost 2.083333 EUR. The declared service-price
+benchmark is twice the preset FCR hourly scale, not an automatic transfer of
+FCR prices to FPP. These
+are explicit scenario assumptions, not a calibration or an FCR block price.
+Revenue, activation cost, net payoff and transfer coefficients remain distinct.
+
+The ideal FM is `-delta_frequency_hz` on the full numerical trajectory with
+no four-second measurement clock. Raise/lower performances integrate
+`max(FM,0)*d_i` / `min(FM,0)*d_i` in time; trapezoidal quadrature includes
+time weights on nonuniform grids. RCR is the directional maximum on that
+grid, checked under refinement. Normalization, 300 s settlement intervals,
+the constant ANDES reference and the accounting residual are retained.
+Internal costs do not enter the zero-sum transfer balance. Historical source
+profiles and the old coefficient-only game retain their saved interpretation.
+See [AEMO_FPP.md](AEMO_FPP.md) for the payoff, units and reproduction commands.
 
 ## Sources and scope
 

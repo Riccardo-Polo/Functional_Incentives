@@ -46,7 +46,7 @@ class FPPDynamicsTests(unittest.TestCase):
         meter = schedule.reference_mw(times).copy()
         meter[-1] += [2., -1.]
         ideal = settle_fpp(times, errors, meter, schedule, profile=IDEAL_PROFILE)
-        np.testing.assert_array_equal(ideal["samples"].fm_hz, -errors[1:])
+        np.testing.assert_array_equal(ideal["samples"].fm_hz, -errors)
         accounts = ideal["accounts"].query("direction == 'raise'").set_index("provider_id")
         np.testing.assert_allclose(accounts.loc[["a","b","residual"]].coefficient_mw_h, [2/12,-1/12,-1/12])
         self.assertTrue((ideal["accounts"].query("direction == 'lower'").coefficient_mw_h == 0.).all())

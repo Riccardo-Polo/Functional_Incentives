@@ -69,12 +69,13 @@ def plot_fpp_controller_comparison(output, source, players, gains):
         save(fig,"responses")
 
         table = pd.read_csv(source / "design_gain_payoffs.csv")
+        unit = "eur" if "score_1_eur" in table else "mw_h"
         fig, axes = plt.subplots(1,2,figsize=(10,4.3), constrained_layout=True)
         for i,(ax,p) in enumerate(zip(axes,players)):
-            matrix = table.pivot(index="theta_1",columns="theta_2",values=f"score_{i+1}_mw_h")
+            matrix = table.pivot(index="theta_1",columns="theta_2",values=f"score_{i+1}_{unit}")
             values = matrix.to_numpy()
             im = ax.imshow(values, cmap="Blues",origin="lower",aspect="auto")
-            fig.colorbar(im,ax=ax,label="Mean FPP coefficient [MW h]")
+            fig.colorbar(im,ax=ax,label="Mean FPP net payoff [EUR]" if unit == "eur" else "Mean FPP coefficient [MW h]")
             for (a,b),v in np.ndenumerate(values):
                 ax.text(b,a,f"{v:.3f}",ha="center",va="center",
                         color="white" if v > (values.min()+values.max())/2 else "#162d40", fontsize=8)
@@ -143,7 +144,8 @@ def plot_fpp_comparison(output_dir: Path, metrics, summary, accounts, schedule="
         axes[1, 0].plot(traces["fpp"].time_s, traces["fpp"].delta_frequency_hz,
                         color=colors["fpp"], label="Physical deviation, delta f")
         axes[1, 0].plot(fm.time_s, fm.fm_hz, color="#007894", marker=".", ms=3,
-                        label="Frequency Measure, 4-second samples")
+                        label=("Frequency Measure, numerical grid" if "performance_mw_hz_s" in accounts else
+                               "Frequency Measure, 4-second samples"))
         axes[1, 0].set(ylabel="Frequency signal [Hz]", title="FPP: frequency and settlement signal")
         axes[1, 0].legend(fontsize=8)
         axes[1, 1].set(xlim=(0, 20), ylabel="RoCoF [Hz/s]", title="Unfiltered model RHS; no smoothing window")
@@ -159,9 +161,11 @@ def plot_fpp_comparison(output_dir: Path, metrics, summary, accounts, schedule="
             levels = " then ".join(f"{v:+g}" for v in events.net_power_deficit_mw)
             all_axes[1, 1].set(ylabel="Net power deficit [MW]", title=f"Prescribed disturbance: {levels} MW")
             excluded = fm[fm.performance_excluded]
-            axes[1, 0].scatter(excluded.time_s, excluded.fm_hz, marker="x", s=65, color="#b7352d",
-                               zorder=5, label="Excluded from performance")
-            axes[1, 0].set(xlim=detail_window, title="Filter memory at reversal (FPP case)")
+            if not excluded.empty:
+                axes[1, 0].scatter(excluded.time_s, excluded.fm_hz, marker="x", s=65, color="#b7352d",
+                                   zorder=5, label="Excluded from performance")
+            axes[1, 0].set(xlim=detail_window, title=("Ideal settlement signal at reversal" if gain_game else
+                                                     "Filter memory at reversal (FPP case)"))
             axes[1, 0].axhline(0, color="#555555", ls=":", lw=.8)
             axes[1, 0].axvline(change_time, color="#555555", ls="--", lw=.8)
             axes[1, 0].legend(fontsize=8)

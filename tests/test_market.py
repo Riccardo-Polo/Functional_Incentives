@@ -9,6 +9,37 @@ from functional_incentives.fpp import (
 
 
 class FPPSettlementTests(unittest.TestCase):
+    def test_ideal_measurements_include_between_four_second_pulses_and_nonuniform_time_weights(self):
+        from functional_incentives.fpp import IDEAL_PROFILE, LEGACY_IDEAL_PROFILE
+        schedule = self.schedule()
+        times = np.unique(np.r_[np.arange(0., 301., 4.), 1., 2., 3.])
+        errors = np.where(times == 2., -.02, 0.)
+        def settle(grid, signal, profile):
+            return settle_fpp(grid, signal, schedule.reference_mw(grid)+[2., -1.], schedule, profile=profile)
+        ideal = settle(times, errors, IDEAL_PROFILE)
+        legacy = settle(times, errors, LEGACY_IDEAL_PROFILE)
+        accounts = ideal["accounts"].query("direction == 'raise'").set_index("provider_id")
+        np.testing.assert_allclose(accounts.loc[["a", "b", "residual"]].performance_mw_hz_s, [.04,-.02,-.02])
+        np.testing.assert_allclose(accounts.coefficient_mw_h.sum(), 0., atol=1e-15)
+        self.assertTrue((legacy["accounts"].coefficient_mw_h == 0).all())
+        self.assertIn(2., ideal["samples"].time_s.to_list())
+        self.assertTrue(ideal["filter_history"].counted.all())
+        refined = np.unique(np.r_[times, 1.5, 2.25, 2.75])
+        dense = settle(refined, np.interp(refined, times, errors), IDEAL_PROFILE)
+        np.testing.assert_allclose(dense["accounts"].performance_mw_hz_s, ideal["accounts"].performance_mw_hz_s)
+        np.testing.assert_allclose(dense["accounts"].coefficient_mw_h, ideal["accounts"].coefficient_mw_h)
+
+    def test_ideal_settlement_integrates_complete_intervals_without_boundary_double_counting(self):
+        from functional_incentives.fpp import IDEAL_PROFILE
+        schedule = self.schedule([[50,50], [50,50], [50,50]])
+        times = np.array([0., 13., 300., 301., 600.])
+        result = settle_fpp(times, np.full_like(times, -.02),
+            schedule.reference_mw(times)+[2.,-1.], schedule, profile=IDEAL_PROFILE)
+        rows = result["accounts"].query("provider_id == 'a' and direction == 'raise'")
+        np.testing.assert_allclose(rows.performance_mw_hz_s, [12.,12.])
+        with self.assertRaisesRegex(ValueError, "interval boundaries"):
+            settle_fpp([0., 600.], [-.02, -.02], [[52.,49.], [52.,49.]], schedule, profile=IDEAL_PROFILE)
+
     def schedule(self, targets=None):
         return DispatchSchedule(("a", "b"), [[50, 50], [50, 50]] if targets is None else targets,
                                 [50, 50], [0, 0], [100, 100], [10, 10])

@@ -1,0 +1,14 @@
+overlay = "aemo_fpp_metered.toml"
+# Existing completed subset is reused only after input and case identity checks.
+reuse_gain_study = "../results/fpp_gain_game"
+seed = 20261103
+fi_design_samples = 8
+evaluation_samples = 8
+gamma_values = [0, 10, 25, 50, 75, 100, 150, 200, 300]
+gain_catalogue = [0, 0.5, 1, 1.5, 2, 3, 4]
+# selected_gamma and gamma_reason are added after inspecting the design curve.
+
+# The historical gamma=50 choice and its old percentages are saved in
+# results/controlled_comparison/. The D-040 resource-cost change invalidates
+# that curve-based justification. Inspect the new curve before adding a new
+# selected_gamma and gamma_reason; this preset stops after the curve for now.

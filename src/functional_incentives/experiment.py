@@ -944,6 +944,8 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIRECTORY)
     parser.add_argument("--seed", type=int, help="override the availability seed")
     tso_mode = parser.add_mutually_exclusive_group()
+    tso_mode.add_argument("--controlled-study", action="store_true",
+                         help="controlled FCR/FI/FPP reversal study with an explicitly chosen Pareto gamma")
     tso_mode.add_argument("--fpp-benchmark", action="store_true",
                          help="compare FCR/FI/FPP using the gain game configured in the FPP overlay")
     tso_mode.add_argument("--fpp-report", type=Path, metavar="STUDY_DIR",
@@ -969,6 +971,14 @@ def main() -> None:
     selection.add_argument("--compare", action="store_true", help="run base and all configured comparisons")
     selection.add_argument("--scenario", help="run one named comparison, or base")
     arguments = parser.parse_args()
+    if arguments.controlled_study:
+        if (arguments.compare or arguments.scenario or arguments.seed is not None or
+                arguments.frequency_weight is not None or arguments.config == DEFAULT_CONFIG_PATH
+                or arguments.output_dir == DEFAULT_OUTPUT_DIRECTORY):
+            parser.error("--controlled-study requires explicit config/output and no scenario, seed or weight override")
+        from .controlled import run_controlled
+        run_controlled(arguments.config, arguments.output_dir)
+        return
     if arguments.fpp_compare_controllers:
         if (arguments.compare or arguments.scenario or arguments.seed is not None or
                 arguments.frequency_weight is not None or arguments.config != DEFAULT_CONFIG_PATH or

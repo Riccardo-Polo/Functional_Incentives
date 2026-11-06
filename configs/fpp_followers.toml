@@ -7,12 +7,12 @@ mode = "fixed"
 conventional_1 = { fixed_offer_mw = 4, fixed_bid_eur_per_mw_block = 15 }
 conventional_2 = { fixed_offer_mw = 4, fixed_bid_eur_per_mw_block = 18 }
 conventional_3 = { fixed_offer_mw = 4, fixed_bid_eur_per_mw_block = 24 }
-renewable_reliable = { fixed_offer_mw = 0, fixed_bid_eur_per_mw_block = 0, participation = "fcr_or_fi", fi_gamma_eur_per_hz_mw_s = 50, fi_rho_eur_per_mw2_s = 1 }
-renewable_uncertain = { fixed_offer_mw = 0, fixed_bid_eur_per_mw_block = 0, participation = "fcr_or_fi", fi_gamma_eur_per_hz_mw_s = 50, fi_rho_eur_per_mw2_s = 1 }
+renewable_reliable = { fixed_offer_mw = 0, fixed_bid_eur_per_mw_block = 0, participation = "fcr_or_fi", fi_gamma_eur_per_hz_mw_s = 50 }
+renewable_uncertain = { fixed_offer_mw = 0, fixed_bid_eur_per_mw_block = 0, participation = "fcr_or_fi", fi_gamma_eur_per_hz_mw_s = 50 }
 
 [game]
 players = ["renewable_reliable", "renewable_uncertain"]
-gains = [0, 0.5, 1, 1.5, 2]
+gains = [0, 0.5, 1, 1.5, 2, 3, 4]
 design_samples = 8
 # Draw one unannounced path uniformly per episode, independently of availability.
 # These synthetic cases define the experiment's prior, not a disturbance forecast.
@@ -22,3 +22,25 @@ paths = [
   { name = "larger_deficit", start_time_s = 20, power_deficit_mw = 8 },
   { name = "reversal", start_time_s = 1, power_deficit_mw = 10, changes = [[120.05, -7]] },
 ]
+
+# Cost rate is k*z^2/2 EUR/hour. The loader converts rho=k/3600 exactly once
+# for the existing EUR/second FI and FPP delivered-response cost ledgers.
+# At z=1 MW, k=50 means marginal cost 50 EUR/MWh and 2.0833 EUR over 5 min.
+[game.activation_cost]
+quadratic_eur_per_mw2_h = { renewable_reliable = 50, renewable_uncertain = 50 }
+source = "Illustrative quadratic resource cost: marginal 50 EUR/MWh at 1 MW; not technology calibration"
+
+# Illustrative hourly service price, separate from energy and FCR products.
+# The preset clears FCR at 24 EUR/MW for 4 h (6 EUR/(MW h)). A declared
+# factor-two activated-service premium sets this FPP benchmark to 12.
+# This is a scenario scale anchor, not an AEMO pricing rule or market estimate.
+[game.prices]
+raise_per_mw_h = 12
+lower_per_mw_h = 12
+currency = "EUR"
+source = "Illustrative service-price benchmark: twice the preset FCR hourly scale; not observed AEMO prices"
+date = "2026-11-06"
+scope = "Single-area ideal FPP gain game"
+evidence = "illustrative"
+price_basis = "synthetic"
+units = "currency/(MW h)"

@@ -1,12 +1,12 @@
 # Matched-scenario assessment of two frozen FPP gain policies.
 base_config = "fcr.toml"
 scenario_name = "fi_endogenous"
-source_profile = "ideal_frequency_gain_game"
+source_profile = "ideal_frequency_net_profit"
 follower_config = "fpp_followers.toml"
 
 [scenario]
 final_time_s = 300.0
-output_time_step_s = 0.05
+output_time_step_s = 0.0125
 maximum_solver_step_s = 0.1
 
 [numerics]
@@ -21,7 +21,5 @@ seed = 20261026
 # Reference defaults to each generator's solved ANDES P_i,0 for the whole horizon.
 # No endpoint targets or reference ramps are prescribed.
 
-# Prices are intentionally absent: export CF * RCR / 12 in MW h.
-# Optional [prices] requires raise_per_mw_h, lower_per_mw_h, currency,
-# source, date (ISO), scope, evidence, price_basis, units="currency/(MW h)".
-# See docs/AEMO_FPP.md. No price is inferred from the FCR block price.
+# Design and delivery inherit explicit illustrative EUR prices from game.prices
+# in fpp_followers.toml. No price is inferred from the FCR block price.

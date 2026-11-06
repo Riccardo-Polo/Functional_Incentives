@@ -1,5 +1,24 @@
 # Work plan after the Week 5 meeting
 
+**6 November 2026 (D-040).** The maintained follower economics now use an
+explicit hourly quadratic cost of 50 EUR/(MW² h), converted once to per-second
+rho=1/72, and symmetric FPP prices of 12 EUR/(MW h). The latter is an
+illustrative factor-two activated-service premium over the preset FCR hourly
+scale 24/4=6, not a market-product identity. The catalogue extends to 4.
+This supersedes the unsupported monetary scale of D-039; its equations,
+causal control, physical inputs and historical results are preserved. The
+same resource cost applies to FI and FPP within the follower preset. Gamma
+is not recalibrated by this change. See results/fpp_economic_scale/ for
+matched repricing, holdout, sensitivity and numerical checks.
+
+**5 November 2026 (D-039).** The maintained FPP gain game now selects theta
+using priced settlement minus the same quadratic delivered-power cost as FI.
+Explicit illustrative raise/lower prices are 120 EUR/(MW h) each. The ideal
+settlement uses raw model frequency over the full numerical trajectory with
+time-weighted quadrature, without the four-second measurement cadence. The
+0.1 s causal target clock remains. See [AEMO_FPP.md](AEMO_FPP.md). Earlier
+equilibria below describe the historical coefficient-only, four-second game.
+
 **31 October 2026.** The first gain game and paired comparison are complete.
 The only empirical pure equilibrium is (2,2) on the configured five-gain
 catalogue. Relative to continuous droop the selected gains reduce integrated

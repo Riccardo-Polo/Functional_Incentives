@@ -28,6 +28,71 @@ from functional_incentives.metrics import (summarize_tso_samples, summarize_tso_
 
 
 class FPPExperimentTests(unittest.TestCase):
+    def test_hourly_fpp_cost_is_converted_once_and_has_known_five_minute_cost(self):
+        from functional_incentives.fpp_study import load_fpp_overlay
+        from functional_incentives.incentives import fi_financial_rates
+        overlay, config, prices, _ = load_fpp_overlay(experiment.PROJECT_ROOT / "configs/aemo_fpp.toml")
+        for raw in config["providers"]:
+            if raw["provider_id"] in overlay["game"]["players"]:
+                self.assertAlmostEqual(raw["fi_rho_eur_per_mw2_s"], 50/3600)
+                params = FIProviderParameters(raw["provider_id"], 1., 4., 0., raw["fi_rho_eur_per_mw2_s"])
+                self.assertAlmostEqual(300*fi_financial_rates(params, 0., 1.)[2], 25/12)
+        self.assertEqual(prices.raise_per_mw_h/12, 1.)  # 1 MW full coefficient, one 5 min interval.
+
+    def test_hourly_fpp_cost_rejects_missing_players_and_nonpositive_values(self):
+        from functional_incentives.fpp_study import load_fpp_overlay
+        from functional_incentives.fpp_game import validate_game
+        overlay, _, _, _ = load_fpp_overlay(experiment.PROJECT_ROOT / "configs/aemo_fpp.toml")
+        for value in (0., -1., float("nan"), float("inf")):
+            game = deepcopy(overlay["game"])
+            game["activation_cost"]["quadratic_eur_per_mw2_h"][game["players"][0]] = value
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "hourly quadratic"):
+                validate_game(game, 300.)
+        game = deepcopy(overlay["game"])
+        del game["activation_cost"]["quadratic_eur_per_mw2_h"][game["players"][1]]
+        with self.assertRaisesRegex(ValueError, "hourly quadratic"):
+            validate_game(game, 300.)
+
+    def test_hourly_fpp_cost_rejects_ambiguous_per_second_declarations(self):
+        from functional_incentives.fpp_study import load_fpp_overlay
+        source = experiment.PROJECT_ROOT / "configs/aemo_fpp.toml"
+        with tempfile.TemporaryDirectory(dir=experiment.PROJECT_ROOT) as temp:
+            root = Path(temp)
+            setup = (source.parent/"fpp_followers.toml").read_text().replace(
+                "fi_gamma_eur_per_hz_mw_s = 50 }", "fi_gamma_eur_per_hz_mw_s = 50, fi_rho_eur_per_mw2_s = 1 }")
+            (root/"followers.toml").write_text(setup)
+            text = source.read_text().replace('base_config = "fcr.toml"',
+                f'base_config = "{(source.parent / "fcr.toml").as_posix()}"').replace(
+                'follower_config = "fpp_followers.toml"', 'follower_config = "followers.toml"')
+            (root/"overlay.toml").write_text(text)
+            with self.assertRaisesRegex(ValueError, "not both"):
+                load_fpp_overlay(root/"overlay.toml")
+
+    def test_gain_study_rejects_cost_metadata_that_disagrees_with_provider_ledgers(self):
+        from functional_incentives.fpp_study import load_fpp_overlay, prepare_gain_study
+        overlay, _, _, _ = load_fpp_overlay(experiment.PROJECT_ROOT / "configs/aemo_fpp.toml")
+        providers = tuple(replace(provider(p, 5), participation="fi", fi_gamma_eur_per_hz_mw_s=50.,
+                                  fi_rho_eur_per_mw2_s=1.) for p in overlay["game"]["players"])
+        cleared = clear_fcr_block(providers, requirement_mw=0., nominal_frequency_hz=60.)
+        with tempfile.TemporaryDirectory(dir=experiment.PROJECT_ROOT) as temp:
+            with self.assertRaisesRegex(ValueError, "differs from the declared hourly"):
+                prepare_gain_study(Path(temp), overlay, cleared, None, None, {})
+
+    def test_controlled_study_cli_requires_explicit_inputs_and_forbids_weighted_selection(self):
+        for flags in (["--controlled-study"], ["--controlled-study","--frequency-weight","10000"]):
+            with patch("sys.argv",["run_fcr",*flags]), patch("sys.stderr",io.StringIO()), self.assertRaises(SystemExit):
+                experiment.main()
+
+    def test_controlled_cache_rejects_different_physical_inputs(self):
+        from functional_incentives.controlled import verified_cache
+        with tempfile.TemporaryDirectory(dir=experiment.PROJECT_ROOT) as folder:
+            root=Path(folder)
+            (root/"overlay.json").write_text("{}")
+            (root/"study_status.json").write_text('{"status":"complete"}')
+            (root/"effective_config.json").write_text('{"plant":1}')
+            with self.assertRaisesRegex(ValueError,"inputs differ"):
+                verified_cache(root,{},{"plant":2},None)
+
     def test_zero_disturbance_counts_every_gain_pair_without_network_integration(self):
         from functional_incentives.fpp_study import prepare_gain_study
         players = ["a", "b"]
@@ -59,6 +124,7 @@ class FPPExperimentTests(unittest.TestCase):
         overlay["assessment"]["samples"] = 2
         schedule = make_dispatch_schedules(cleared, overlay["schedules"], 300)["constant"]
         calls = []
+        cost_scale = .01
         def synthetic_meters(_plant, providers, *, dispatch_schedule, **options):
             # Favor delivery in design, penalize it in holdout. Re-selection would flip both gains.
             sign = 1 if len(calls) < 8 else -1
@@ -71,21 +137,59 @@ class FPPExperimentTests(unittest.TestCase):
                     meters[1:, j] += sign * p.theta * p.reserve_mw
             calls.append((tuple(p.reserve_mw for p in providers), options["start_time_s"],
                           options["power_deficit_mw"], options["power_deficit_changes"]))
-            return SimpleNamespace(time_s=times, delta_frequency_hz=errors, provider_active_power_mw=meters)
+            followers = [p for p in providers if isinstance(p, FPPProviderParameters)]
+            return SimpleNamespace(time_s=times, delta_frequency_hz=errors, provider_active_power_mw=meters,
+                fpp_provider_ids=tuple(p.provider_id for p in followers),
+                fpp_activation_cost_eur=np.array([[0. for p in followers], [cost_scale*p.theta**2 for p in followers]]))
         with tempfile.TemporaryDirectory(dir=experiment.PROJECT_ROOT) as temp:
             directory = Path(temp)
             with patch("functional_incentives.fpp_study.simulate_fcr_power_step", side_effect=synthetic_meters):
                 episodes, _, integrations = prepare_gain_study(directory, overlay, cleared, plant, schedule, {})
             decision = json.loads((directory / "gain_equilibrium.json").read_text())
             audit = pd.read_csv(directory / "holdout_deviations.csv")
+            scores = pd.read_csv(directory / "design_gain_scores.csv")
         self.assertEqual(integrations, 16)
         self.assertEqual(decision["pure_profiles"], [[1.,1.]])
         self.assertTrue(all((r["theta_1"], r["theta_2"]) == (1.,1.) for r in episodes))
         self.assertEqual([r["bank"] for r in episodes], ["assessment", "assessment", "delivery"])
-        self.assertTrue((audit.query("deviating_theta == 0").paired_gain_mw_h > 0.).all())
+        self.assertTrue((audit.query("deviating_theta == 0").paired_gain_eur > 0.).all())
+        for i in (1, 2):
+            np.testing.assert_allclose(scores[f"score_{i}_eur"],
+                scores[f"revenue_{i}_eur"] - scores[f"activation_cost_{i}_eur"])
+            np.testing.assert_allclose(scores[f"revenue_{i}_eur"], 12*scores[f"coefficient_{i}_mw_h"])
+        self.assertEqual(decision["score_unit"], "eur")
         for offset in range(0, len(calls), 4):
             self.assertEqual(len(set(calls[offset:offset+4])), 1)
         self.assertNotEqual(calls[0][0], calls[8][0])
+        # Keep every physical meter and scenario identical; a larger delivered
+        # cost alone must change the chosen gain to zero.
+        calls.clear()
+        cost_scale = 1e6
+        with tempfile.TemporaryDirectory(dir=experiment.PROJECT_ROOT) as temp:
+            with patch("functional_incentives.fpp_study.simulate_fcr_power_step", side_effect=synthetic_meters):
+                prepare_gain_study(Path(temp), overlay, cleared, plant, schedule, {})
+            costly = json.loads((Path(temp)/"gain_equilibrium.json").read_text())
+        self.assertEqual(costly["pure_profiles"], [[0., 0.]])
+
+    def test_net_profit_game_requires_explicit_eur_prices(self):
+        from functional_incentives.fpp_study import load_fpp_overlay
+        from functional_incentives.fpp_game import validate_game
+        overlay, _, _, _ = load_fpp_overlay(experiment.PROJECT_ROOT / "configs/aemo_fpp.toml")
+        game = deepcopy(overlay["game"])
+        game["prices"]["currency"] = "AUD"
+        with self.assertRaisesRegex(ValueError, "EUR"):
+            validate_game(game, 300.)
+        source = experiment.PROJECT_ROOT / "configs/aemo_fpp.toml"
+        with tempfile.TemporaryDirectory(dir=experiment.PROJECT_ROOT) as temp:
+            root = Path(temp)
+            # The loader consumes TOML; remove only its final price table.
+            (root/"followers.toml").write_text((source.parent/"fpp_followers.toml").read_text().split("[game.prices]")[0])
+            text = source.read_text().replace('base_config = "fcr.toml"',
+                f'base_config = "{(source.parent / "fcr.toml").as_posix()}"').replace(
+                    'follower_config = "fpp_followers.toml"', 'follower_config = "followers.toml"')
+            (root/"overlay.toml").write_text(text)
+            with self.assertRaisesRegex(ValueError, "explicit EUR prices"):
+                load_fpp_overlay(root/"overlay.toml")
 
     def test_gain_search_uses_paired_inputs_and_separate_private_best_responses(self):
         from functional_incentives.fpp_game import evaluate_gain_bank, gain_equilibrium, deviation_gains
@@ -124,7 +228,8 @@ class FPPExperimentTests(unittest.TestCase):
         path = experiment.PROJECT_ROOT / "configs/aemo_fpp_metered.toml"
         overlay, config, prices, _ = load_fpp_overlay(path)
         self.assertEqual(overlay["assessment_schedule"], "constant")
-        self.assertIsNone(prices)
+        self.assertEqual(prices.currency, "EUR")
+        self.assertEqual(prices.raise_per_mw_h, 12)
         with redirect_stdout(io.StringIO()):
             _, cleared, _ = experiment.prepare_experiment(config)
         solved = {p.provider_id: p.operating_power_mw for p in cleared.providers}
@@ -163,7 +268,7 @@ class FPPExperimentTests(unittest.TestCase):
         self.assertEqual(original, reversal)
         self.assertEqual({k: v for k, v in new.items() if k != "disturbance_changes"}, old)
         self.assertEqual(new["disturbance_changes"], [{"time_s": 120.05, "net_power_deficit_mw": -7.}])
-        self.assertIsNone(prices)
+        self.assertEqual(prices.currency, "EUR")
 
     def test_fixed_policy_mapping_reuses_awards_gains_and_actual_availability(self):
         from functional_incentives.fpp_study import policy_response_parameters
@@ -204,7 +309,7 @@ class FPPExperimentTests(unittest.TestCase):
                 self.assertEqual(current[key], previous[key])
         self.assertEqual(config["scenario"]["power_deficit_mw"], 10)
         self.assertEqual(config["scenario"]["final_time_s"], 300)
-        self.assertIsNone(prices)
+        self.assertEqual(prices.currency, "EUR")
         rows = [{"bank": "assessment", "sample": s, "schedule": "constant", "policy": p,
                  "metric": s + j} for s in range(2) for j, p in enumerate(("fcr_alone", "bilinear_fi", "fpp"))]
         rows.append(dict(bank="delivery", sample=0, schedule="constant", policy="fpp", metric=999))

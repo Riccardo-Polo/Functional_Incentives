@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from .experiment import prepare_experiment
-from .fpp import IDEAL_PROFILE, SAMPLE_SECONDS, settle_fpp
+from .fpp import IDEAL_PROFILE, LEGACY_IDEAL_PROFILE, SAMPLE_SECONDS, RegulationPrices, settle_fpp
 from .fpp_study import make_dispatch_schedules, policy_response_parameters, save_trajectory, write_json
 from .metrics import summarize_fpp_benchmark
 from .simulation import realize_fcr_block, simulate_fcr_power_step
@@ -30,7 +30,9 @@ def run_controller_comparison(source: Path, output: Path):
     def read(name):
         return json.loads((source / name).read_text(encoding="utf-8"))
     overlay, policy = read("overlay.json"), read("gain_equilibrium.json")
-    if read("study_status.json")["status"] != "complete" or overlay["source_profile"] != IDEAL_PROFILE:
+    profile = overlay["source_profile"]
+    prices = RegulationPrices(**overlay["prices"]) if "prices" in overlay else None
+    if read("study_status.json")["status"] != "complete" or profile not in (IDEAL_PROFILE, LEGACY_IDEAL_PROFILE):
         raise ValueError("controller comparison requires a completed ideal-frequency gain-game study")
     players = policy["players"]
     config = read("effective_config.json")
@@ -65,9 +67,10 @@ def run_controller_comparison(source: Path, output: Path):
                    output_time_step_s=config["scenario"]["output_time_step_s"],
                    maximum_solver_step_s=config["scenario"]["maximum_solver_step_s"],
                    provider_operating_power_mw=schedule.initial_operating_power_mw, dispatch_schedule=schedule,
-                   measurement_times_s=np.arange(SAMPLE_SECONDS, horizon+1, SAMPLE_SECONDS), **overlay["numerics"])
+                   measurement_times_s=(() if profile == IDEAL_PROFILE else
+                                        np.arange(SAMPLE_SECONDS, horizon+1, SAMPLE_SECONDS)), **overlay["numerics"])
     output.mkdir(parents=True, exist_ok=True)
-    write_json(output / "comparison_inputs.json", dict(source_study=str(source), settlement_profile=IDEAL_PROFILE,
+    write_json(output / "comparison_inputs.json", dict(source_study=str(source), settlement_profile=profile,
         reference="solved constant ANDES P_i,0", operating_power_mw=dict(zip(schedule.provider_ids, schedule.initial_operating_power_mw)),
         availability_mw=draw, players=players, episode_gains=gains, source_gain_distribution=policy["probabilities"],
         awards=[asdict(a) for a in cleared.market.awards], profile_cases=CASES, initial_event_s=1.,
@@ -83,7 +86,7 @@ def run_controller_comparison(source: Path, output: Path):
                 case_options = {**options, "power_deficit_changes":changes}
                 trace = simulate_fcr_power_step(plant, responses, **case_options)
                 table = settle_fpp(trace.time_s, trace.delta_frequency_hz, trace.provider_active_power_mw,
-                                   schedule, profile=IDEAL_PROFILE)
+                                   schedule, prices, profile=profile)
                 samples = table["samples"]
                 if (samples.performance_excluded.any() or not np.array_equal(samples.fm_hz, -samples.delta_frequency_hz)
                         or not table["directions"].reliable.all()):
@@ -117,7 +120,7 @@ def run_controller_comparison(source: Path, output: Path):
                     raise RuntimeError("refinement grids are not nested")
                 fine_metric, _ = summarize_fpp_benchmark(fine, schedule, 1.)
                 fine_table = settle_fpp(fine.time_s, fine.delta_frequency_hz, fine.provider_active_power_mw,
-                                        schedule, profile=IDEAL_PROFILE)
+                                        schedule, prices, profile=profile)
                 checks = dict(frequency_diff_hz=float(np.max(abs(trace.delta_frequency_hz-fine.delta_frequency_hz[idx]))),
                     response_diff_mw=float(np.max(abs(trace.provider_response_mw-fine.provider_response_mw[idx]))),
                     rocof_peak_diff_hz_per_s=abs(metric["rocof_max_abs_hz_per_s"]-fine_metric["rocof_max_abs_hz_per_s"]),
@@ -154,9 +157,11 @@ def write_controller_analysis(output, source, players, gains):
     labels = dict(continuous_droop="Previous continuous droop", sampled_unit_gain="Sampled unit gain",
                   selected_gains="Selected gains")
     lines = ["# Paired FPP controller comparison", "",
-        f"The selected episode gains are {', '.join(f'{p} = {gains[p]:g}' for p in players)}. "
-        "Every controller settles its own unfiltered frequency and metered response at the same 75 "
-        "four-second timestamps against constant ANDES references. "
+        f"The selected episode gains are {', '.join(f'{p} = {gains[p]:g}' for p in players)}. " +
+        ("Every controller settles its own unfiltered frequency and metered response on the full numerical "
+         "trajectory against constant ANDES references. " if inputs["settlement_profile"] == IDEAL_PROFILE else
+         "Every controller settles its own unfiltered frequency and metered response at the same 75 "
+         "four-second timestamps against constant ANDES references. ") +
         "All physical generators and the accounting residual enter the same two directional ledgers.", "",
         "## Delivery conditions", "",
         "Both cases begin with a 10 MW deficit at 1 s. The reversal replaces it with a 7 MW surplus "
@@ -187,12 +192,12 @@ def write_controller_analysis(output, source, players, gains):
                      f"{selected.rocof_max_abs_hz_per_s-fixed.rocof_max_abs_hz_per_s:+.8f} Hz/s.")
     scores = accounts.groupby(["case","controller","provider_id"]).coefficient_mw_h.sum()
     saturation = pd.read_csv(output/"saturation.csv").set_index(["case","controller","provider_id"])
-    lines += ["", "## Signed FPP scores", "",
+    lines += ["", "## Signed FPP transfer coefficients", "",
         "| Case | Controller | " + " | ".join([*players,"residual"]) + " |", "|---|---|---:|---:|---:|"]
     for case,controller in metrics.index:
         values = [scores.loc[case,controller,p] for p in [*players,"residual"]]
         lines.append(f"| {case} | {labels[controller]} | " + " | ".join(f"{v:+.8f}" for v in values) + " |")
-    lines += ["", "Scores are raise plus lower coefficients in MW h. The conventional providers also "
+    lines += ["", "This table sums raise plus lower transfer coefficients in MW h. The conventional providers also "
         "settle and appear in accounts.csv. The activation cost is a separate ledger. These are two "
         "matched delivery cases using one availability vector. The finite design table and independent "
         f"holdout are in [{source.name}](../{source.name}/ANALYSIS.md).", "",
@@ -215,16 +220,18 @@ def write_controller_analysis(output, source, players, gains):
     lines += ["", "Negative directional coefficients in these selected deliveries belong to " +
               ", ".join(sorted(negative.provider_id.unique())) + ". The residual is a passive accounting entity."]
     decision = json.loads((source/"gain_equilibrium.json").read_text(encoding="utf-8"))
+    unit = decision.get("score_unit", "mw_h")
+    label = "EUR" if unit == "eur" else "MW h"
     payoffs = pd.read_csv(source/"design_gain_payoffs.csv")
     holdout = pd.read_csv(source/"holdout_deviations.csv").set_index(["provider_id","deviating_theta"])
-    first = payoffs.pivot(index="theta_1",columns="theta_2",values="score_1_mw_h").to_numpy()
-    second = payoffs.pivot(index="theta_1",columns="theta_2",values="score_2_mw_h").to_numpy()
+    first = payoffs.pivot(index="theta_1",columns="theta_2",values=f"score_1_{unit}").to_numpy()
+    second = payoffs.pivot(index="theta_1",columns="theta_2",values=f"score_2_{unit}").to_numpy()
     own_scores = [first @ decision["probabilities"][players[1]], decision["probabilities"][players[0]] @ second]
     lines += ["", "## Changing one gain with the opponent policy held fixed", "",
-        "| Own gain | Player 1 design score [MW h] | Player 2 design score [MW h] | Player 1 holdout change [MW h] | Player 2 holdout change [MW h] |",
+        f"| Own gain | Player 1 design score [{label}] | Player 2 design score [{label}] | Player 1 holdout change [{label}] | Player 2 holdout change [{label}] |",
         "|---:|---:|---:|---:|---:|"]
     for i, gain in enumerate(decision["catalogue"]):
-        deltas = [holdout.loc[(p,gain)].paired_gain_mw_h for p in players]
+        deltas = [holdout.loc[(p,gain), f"paired_gain_{unit}"] for p in players]
         lines.append(f"| {gain:g} | {own_scores[0][i]:.8f} | {own_scores[1][i]:.8f} | "
                      f"{deltas[0]:+.8f} | {deltas[1]:+.8f} |")
     lines += ["", "The holdout change is the paired difference from following the frozen profile. "

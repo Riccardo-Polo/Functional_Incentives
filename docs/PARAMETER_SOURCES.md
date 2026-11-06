@@ -9,6 +9,24 @@ continue to refer to the original preset.
 
 ## Evidence rules
 
+**Current FPP economic benchmark, 6 November 2026 (D-040):** the user requested
+interpretable monetary scales. Both players declare hourly quadratic activation
+cost k=50 EUR/(MW² h); the loader converts rho=k/3600=1/72 EUR/(MW² s).
+This means marginal 50 EUR/MWh at 1 MW, and 2.083333 EUR for a constant 1 MW
+over 300 s. This is a scenario resource-cost proxy, not measured renewable
+cost or a linear energy opportunity-cost model. Symmetric FPP prices are
+12 EUR/(MW h), anchored illustratively at twice the preset FCR hourly scale
+24/4=6. The factor-two premium is an explicit assumption, not an AEMO rule
+or evidence that these products have identical prices. No claim of market
+calibration is made. Sensitivity uses prices 6/12/24 and hourly costs
+25/50/100. The baseline/Week-5 rho remains unchanged in configs/fcr.toml.
+
+**FPP update, 5 November 2026 (D-039):** the ideal net-profit game uses synthetic
+raise/lower prices of 120 EUR/(MW h) each, selected with user authorization
+as illustrative scales, not from an observed dataset. Both players reuse the
+FI cost rho=1 EUR/(MW² s). `configs/fpp_followers.toml` records these scenario
+assumptions and price provenance. There is no implicit AUD/EUR conversion.
+
 For each proposed value record: parameter/provider, current value, source title
 and version/date, page/table/equation or dataset column, geography/technology,
 original units and power/time base, transformation to model units, proposed

@@ -7,17 +7,28 @@ import pandas as pd
 from scipy.optimize import linprog
 
 from .simulation import power_deficit_events
+from .fpp import RegulationPrices
 
 
-GAP_TOLERANCE_MW_H = 1e-10
+GAP_TOLERANCE = 1e-10  # In the explicitly reported payoff units (EUR or legacy MW h).
 
 
 def validate_game(game, horizon):
-    if set(game) != {"players", "gains", "paths", "design_samples"}:
+    if set(game) - {"players", "gains", "paths", "design_samples", "prices", "activation_cost"} or not {
+            "players", "gains", "paths", "design_samples"} <= set(game):
         raise ValueError("gain game requires players, gains, paths and design_samples")
     players = game["players"]
+    if "prices" in game and RegulationPrices(**game["prices"]).currency != "EUR":
+        raise ValueError("FPP gain-game prices must be in EUR to subtract EUR activation costs")
     if len(players) != 2 or len(set(players)) != 2 or not all(isinstance(p, str) and p for p in players):
         raise ValueError("declare two distinct FPP provider identities")
+    if "activation_cost" in game:
+        cost = game["activation_cost"]
+        if (set(cost) != {"quadratic_eur_per_mw2_h", "source"}
+                or not isinstance(cost["source"], str) or not cost["source"].strip()
+                or set(cost["quadratic_eur_per_mw2_h"]) != set(players)
+                or not all(np.isfinite(v) and v > 0 for v in cost["quadratic_eur_per_mw2_h"].values())):
+            raise ValueError("declare a positive hourly quadratic activation cost per player and its source")
     gains = np.asarray(game["gains"], dtype=float)
     if (gains.ndim != 1 or not gains.size or not np.all(np.isfinite(gains))
             or gains[0] < 0 or np.any(np.diff(gains) <= 0)):
@@ -49,17 +60,19 @@ def path_options(path):
                 power_deficit_changes=tuple(map(tuple, path.get("changes", ()))))
 
 
-def evaluate_gain_bank(bank, gains, score):
+def evaluate_gain_bank(bank, gains, score, *, score_unit="mw_h"):
     """Evaluate both private scores on the very same joint case for every profile."""
     values = np.empty((len(bank), len(gains), len(gains), 2))
     records = []
     for sample, row in enumerate(bank):
         for i, j in product(range(len(gains)), repeat=2):
-            values[sample, i, j] = score(row, (gains[i], gains[j]))
-            first, second = values[sample, i, j]
+            result = score(row, (gains[i], gains[j]))
+            details = result if isinstance(result, dict) else dict(zip(
+                (f"score_1_{score_unit}", f"score_2_{score_unit}"), result, strict=True))
+            values[sample, i, j] = [details[f"score_{p}_{score_unit}"] for p in (1, 2)]
             records.append(dict(bank=row["bank"], sample=row["sample"], path=row["path"],
                                 theta_1=gains[i], theta_2=gains[j],
-                                score_1_mw_h=first, score_2_mw_h=second))
+                                **details))
     if not np.all(np.isfinite(values)):
         raise ValueError("non-finite FPP performance in gain table")
     return values, pd.DataFrame(records)
@@ -98,8 +111,8 @@ def gain_equilibrium(mean):
     if mean.ndim != 3 or mean.shape[2] != 2 or min(mean.shape) == 0 or not np.all(np.isfinite(mean)):
         raise ValueError("expected a finite pair of nonempty payoff matrices")
     first, second = mean[..., 0], mean[..., 1]
-    pure = np.argwhere((first.max(axis=0) - first <= GAP_TOLERANCE_MW_H)
-                       & (second.max(axis=1)[:, None] - second <= GAP_TOLERANCE_MW_H))
+    pure = np.argwhere((first.max(axis=0) - first <= GAP_TOLERANCE)
+                       & (second.max(axis=1)[:, None] - second <= GAP_TOLERANCE))
     if len(pure):
         i, j = pure[0]
         return np.eye(len(first))[i], np.eye(len(second.T))[j], pure.tolist()
@@ -110,6 +123,6 @@ def gain_equilibrium(mean):
         if y is None:
             continue
         x = _opponent_mix(second.T, cols, rows)
-        if x is not None and all(g.max() <= GAP_TOLERANCE_MW_H for g in deviation_gains(mean, x, y)):
+        if x is not None and all(g.max() <= GAP_TOLERANCE for g in deviation_gains(mean, x, y)):
             return x, y, []
     raise RuntimeError("could not numerically verify an equilibrium of the design payoff matrices")

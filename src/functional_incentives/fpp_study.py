@@ -13,9 +13,9 @@ import tomllib
 import numpy as np
 import pandas as pd
 
-from .fpp import (DispatchSchedule, RegulationPrices, SOURCE_PROFILE, IDEAL_PROFILE, SAMPLE_SECONDS,
+from .fpp import (DispatchSchedule, RegulationPrices, SOURCE_PROFILE, LEGACY_IDEAL_PROFILE, IDEAL_PROFILE, SAMPLE_SECONDS,
                   complete_interval_count, settle_fpp)
-from .fpp_game import (GAP_TOLERANCE_MW_H, validate_game, draw_gain_bank, path_options,
+from .fpp_game import (GAP_TOLERANCE, validate_game, draw_gain_bank, path_options,
                        evaluate_gain_bank, gain_equilibrium, deviation_gains)
 from .providers import FCRProviderParameters, FPPProviderParameters
 from .simulation import realize_fcr_block, simulate_fcr_power_step, power_deficit_events
@@ -37,9 +37,9 @@ def load_fpp_overlay(path: Path):
                               "follower_config"}
     if unknown:
         raise ValueError(f"unsupported FPP overlay fields: {sorted(unknown)}")
-    if overlay["source_profile"] not in (SOURCE_PROFILE, IDEAL_PROFILE):
+    if overlay["source_profile"] not in (SOURCE_PROFILE, LEGACY_IDEAL_PROFILE, IDEAL_PROFILE):
         raise ValueError("unsupported FPP source profile; constants are not tuning knobs")
-    if ("follower_config" in overlay) != (overlay["source_profile"] == IDEAL_PROFILE):
+    if ("follower_config" in overlay) != (overlay["source_profile"] in (LEGACY_IDEAL_PROFILE, IDEAL_PROFILE)):
         raise ValueError("the two-provider game requires its ideal-frequency settlement profile")
     base_path = (path.parent / overlay["base_config"]).resolve()
     source = base_path.read_text(encoding="utf-8")
@@ -53,11 +53,27 @@ def load_fpp_overlay(path: Path):
         setup = tomllib.loads(setup_path.read_text(encoding="utf-8"))
         if set(setup) != {"fleet", "game"} or set(setup["fleet"]) - {"decision", "providers", "market"}:
             raise ValueError("invalid FPP follower setup")
+        overlay["game"] = setup["game"]
+        validate_game(overlay["game"], overlay["scenario"]["final_time_s"])
+        # Inputs may use economically readable hourly costs. The physical and
+        # financial simulator always receives the existing per-second rho.
+        if "activation_cost" in overlay["game"]:
+            for identity, hourly in overlay["game"]["activation_cost"]["quadratic_eur_per_mw2_h"].items():
+                provider = setup["fleet"].setdefault("providers", {}).setdefault(identity, {})
+                if "fi_rho_eur_per_mw2_s" in provider:
+                    raise ValueError("declare activation cost in hourly or per-second units, not both")
+                provider["fi_rho_eur_per_mw2_s"] = hourly / 3600.
         # Use the existing scenario override and clearing interfaces.
         variant = dict(name="fpp_followers", label="Two FPP followers", **setup["fleet"])
         config = configured_scenarios({**config, "comparisons": [variant]})[-1][2]
-        overlay["game"] = setup["game"]
-        validate_game(overlay["game"], overlay["scenario"]["final_time_s"])
+        if overlay["source_profile"] == IDEAL_PROFILE:
+            if "prices" not in overlay["game"]:
+                raise ValueError("net-profit FPP game requires explicit EUR prices")
+            if "prices" in overlay and overlay["prices"] != overlay["game"]["prices"]:
+                raise ValueError("design and delivery must use the same FPP prices")
+            overlay["prices"] = overlay["game"]["prices"]
+        elif "prices" in overlay["game"]:
+            raise ValueError("use the net-profit profile for cost-aware gain selection")
     if set(overlay["scenario"]) - {"final_time_s", "output_time_step_s", "maximum_solver_step_s"}:
         raise ValueError("FPP overlay only changes horizon and numerical sampling, not physical/market inputs")
     config["scenario"].update(overlay["scenario"])
@@ -158,52 +174,79 @@ def save_trajectory(trajectory, schedule, directory):
         save_fi_accounting(trajectory, directory)
 
 
-def prepare_gain_study(output_dir, overlay, cleared, parameters, schedule, options):
+def prepare_gain_study(output_dir, overlay, cleared, parameters, schedule, options, *, cached_scores=None):
     """Design first, freeze the policy, then assess it on fresh coupled scenarios."""
     from scipy.stats import t
 
     game = overlay["game"]
+    prices = RegulationPrices(**game["prices"]) if "prices" in game else None
+    score_unit = "eur" if prices is not None else "mw_h"
+    settlement_profile = overlay.get("source_profile", LEGACY_IDEAL_PROFILE)
     players, gains, paths = game["players"], game["gains"], game["paths"]
     followers = {p.provider_id for p, mode in zip(cleared.providers, cleared.participation_modes)
                  if mode == "fi"}
     if set(players) != followers:
         raise ValueError(f"game players {players} must match actual zero-award followers {sorted(followers)}")
+    if "activation_cost" in game:
+        hourly = game["activation_cost"]["quadratic_eur_per_mw2_h"]
+        if any(not np.isclose(p.fi_rho_eur_per_mw2_s, hourly[p.provider_id] / 3600., rtol=1e-13, atol=0.)
+               for p in cleared.providers if p.provider_id in players):
+            raise ValueError("resolved provider rho differs from the declared hourly activation cost")
     path_by_name = {p["name"]: p for p in paths}
     streams = np.random.SeedSequence(overlay["assessment"]["seed"]).spawn(5)
 
     def evaluate(bank):
         integrations = 0
+        reused = 0
         blocks = {r["sample"]: realize_fcr_block(cleared,
             {p.provider_id: r[p.provider_id] for p in cleared.providers}) for r in bank}
 
         def score(row, profile):
-            nonlocal integrations
-            path = path_by_name[row["path"]]
+            nonlocal integrations, reused
             if profile == (gains[0], gains[0]):
                 print(f"FPP gain table: {row['bank']} case {row['sample']+1}/{len(bank)}, {row['path']}", flush=True)
+            key = (row["bank"], row["sample"], *profile)
+            if cached_scores is not None and key in cached_scores:
+                reused += 1
+                return cached_scores[key]
+            path = path_by_name[row["path"]]
             # At the solved point with zero disturbance throughout the horizon
             # every response, FM sample and settlement coefficient is exactly zero.
             if path["power_deficit_mw"] == 0 and all(level == 0 for _, level in path.get("changes", ())):
-                return (0., 0.)
+                if prices is None:
+                    return (0., 0.)
+                return {f"{name}_{i}_{unit}": 0. for i in (1, 2) for name, unit in (
+                    ("score", "eur"), ("coefficient", "mw_h"), ("revenue", "eur"), ("activation_cost", "eur"))}
             responses = policy_response_parameters(cleared, blocks[row["sample"]], "fpp",
                                                    gains=dict(zip(players, profile, strict=True)))
             case_options = {**options, **path_options(path)}
             trace = simulate_fcr_power_step(parameters, responses, dispatch_schedule=schedule, **case_options)
             integrations += 1
             accounts = settle_fpp(trace.time_s, trace.delta_frequency_hz, trace.provider_active_power_mw,
-                                  schedule, profile=IDEAL_PROFILE)["accounts"]
+                                  schedule, prices, profile=settlement_profile)["accounts"]
             if accounts.groupby(["interval", "direction"]).coefficient_mw_h.sum().abs().max() > 1e-10:
                 raise RuntimeError("gain-game settlement does not balance including the residual")
-            return accounts.groupby("provider_id").coefficient_mw_h.sum().loc[players].to_numpy()
+            coefficients = accounts.groupby("provider_id").coefficient_mw_h.sum().loc[players].to_numpy()
+            if prices is None:
+                return coefficients
+            revenues = accounts.groupby("provider_id").net_settlement.sum()
+            details = {}
+            for i, identity in enumerate(players, 1):
+                cost = float(trace.fpp_activation_cost_eur[-1, trace.fpp_provider_ids.index(identity)])
+                revenue = float(revenues.loc[identity])
+                details.update({f"score_{i}_eur": revenue - cost, f"coefficient_{i}_mw_h": coefficients[i-1],
+                                f"revenue_{i}_eur": revenue, f"activation_cost_{i}_eur": cost})
+            return details
 
         wall, cpu = perf_counter(), process_time()
-        values, records = evaluate_gain_bank(bank, gains, score)
+        values, records = evaluate_gain_bank(bank, gains, score, score_unit=score_unit)
         bank_name = bank[0]["bank"]
         records.to_csv(output_dir / f"{bank_name}_gain_scores.csv", index=False)
-        mean_table = records.groupby(["theta_1", "theta_2"])[["score_1_mw_h", "score_2_mw_h"]].mean()
+        mean_table = records.groupby(["theta_1", "theta_2"])[[c for c in records if c not in
+            ("bank", "sample", "path", "theta_1", "theta_2")]].mean()
         mean_table.to_csv(output_dir / f"{bank_name}_gain_payoffs.csv")
         return values, dict(integrations=integrations, profile_evaluations=len(records),
-                            exact_zero_scores=len(records)-integrations,
+                            reused_scores=reused, exact_zero_scores=len(records)-integrations-reused,
                             wall_s=perf_counter()-wall, cpu_s=process_time()-cpu)
 
     design = draw_gain_bank("design", game["design_samples"], streams[2], cleared.providers, paths)
@@ -212,12 +255,20 @@ def prepare_gain_study(output_dir, overlay, cleared, parameters, schedule, optio
     mean = design_values.mean(axis=0)
     start_wall, start_cpu = perf_counter(), process_time()
     x, y, pure = gain_equilibrium(mean)
-    result = dict(players=players, catalogue=gains, score="raise plus lower CF * RCR / 12 in MW h",
-                  decision_interval_s=0.1, tolerance_mw_h=GAP_TOLERANCE_MW_H,
+    result = dict(players=players, catalogue=gains,
+                  score=("priced raise plus lower settlement minus integrated rho*z^2/2" if prices else
+                         "raise plus lower CF * RCR / 12 in MW h"),
+                  score_unit=score_unit, prices=None if prices is None else asdict(prices),
+                  activation_cost_rho_eur_per_mw2_s={p.provider_id: p.fi_rho_eur_per_mw2_s
+                      for p in cleared.providers if p.provider_id in players} if prices else None,
+                  activation_cost_quadratic_eur_per_mw2_h={p.provider_id: 3600*p.fi_rho_eur_per_mw2_s
+                      for p in cleared.providers if p.provider_id in players} if prices else None,
+                  settlement_profile=settlement_profile,
+                  decision_interval_s=0.1, **{f"tolerance_{score_unit}": GAP_TOLERANCE},
                   selection="first pure profile in ascending catalogue order, else first feasible support pair",
                   pure_profiles=[[gains[i], gains[j]] for i, j in pure],
                   kind="pure" if pure else "mixed", probabilities={players[0]: x.tolist(), players[1]: y.tolist()},
-                  design_gaps_mw_h=[float(v.max()) for v in deviation_gains(mean, x, y)],
+                  **{f"design_gaps_{score_unit}": [float(v.max()) for v in deviation_gains(mean, x, y)]},
                   selection_wall_s=perf_counter()-start_wall, selection_cpu_s=process_time()-start_cpu,
                   design_timing=design_timing)
     write_json(output_dir / "gain_equilibrium.json", result)
@@ -239,9 +290,10 @@ def prepare_gain_study(output_dir, overlay, cleared, parameters, schedule, optio
             for player, differences in zip(players, deviation_gains(validation, x, y), strict=True):
                 for gain, samples in zip(gains, differences.T, strict=True):
                     avg, se = float(samples.mean()), float(samples.std(ddof=1) / np.sqrt(size))
-                    audit.append(dict(provider_id=player, deviating_theta=gain, paired_gain_mw_h=avg,
-                                      paired_se_mw_h=se, simultaneous_upper_95_mw_h=avg +
-                                      t.ppf(1 - .05 / (2 * len(gains)), size-1) * se))
+                    audit.append(dict(provider_id=player, deviating_theta=gain,
+                                      **{f"paired_gain_{score_unit}": avg, f"paired_se_{score_unit}": se,
+                                         f"simultaneous_upper_95_{score_unit}": avg +
+                                         t.ppf(1 - .05 / (2 * len(gains)), size-1) * se}))
             pd.DataFrame(audit).to_csv(output_dir / "holdout_deviations.csv", index=False)
         elif overlay.get("disturbance_changes"):
             # Optional prescribed stress delivery. Neither design nor holdout uses this override.
@@ -312,7 +364,8 @@ def run_fpp_study(overlay_path: Path, output_dir: Path):
             output_time_step_s=scenario["output_time_step_s"], maximum_solver_step_s=scenario["maximum_solver_step_s"],
             fi_decision_interval_s=config["fi"]["decision_interval_s"], **overlay["numerics"],
             provider_operating_power_mw=[p.operating_power_mw for p in cleared.providers],
-            measurement_times_s=np.arange(4, scenario["final_time_s"] + 1, SAMPLE_SECONDS))
+            measurement_times_s=(() if overlay["source_profile"] == IDEAL_PROFILE else
+                                 np.arange(4, scenario["final_time_s"] + 1, SAMPLE_SECONDS)))
         game = overlay.get("game")
         stream_ids = {"assessment": [0], "delivery": [1]}
         gain_integrations = 0
@@ -430,7 +483,7 @@ def run_fpp_study(overlay_path: Path, output_dir: Path):
                 check["coefficient_max_diff_mw_h"] = float(np.max(abs(a["accounts"].coefficient_mw_h - b["accounts"].coefficient_mw_h)))
                 check["rcr_max_diff_mw"] = float(np.max(abs(a["directions"].rcr_mw - b["directions"].rcr_mw)))
                 if check["coefficient_max_diff_mw_h"] > 1e-6 or check["rcr_max_diff_mw"] > 1e-5:
-                    raise RuntimeError("FPP settlement refinement exceeds tolerance")
+                    raise RuntimeError(f"FPP settlement refinement exceeds tolerance: {check}")
             if (check["frequency_max_diff_hz"] > 1e-6 or check["response_max_diff_mw"] > 1e-5
                     or check["integrated_error_diff_hz2_s"] > 1e-7
                     or check["nadir_sampled_hz_difference"] > 1e-5
@@ -515,18 +568,32 @@ def run_fpp_report(output_dir: Path):
 
 def write_gain_analysis(output_dir, summary, status):
     result = json.loads((output_dir / "gain_equilibrium.json").read_text(encoding="utf-8"))
+    unit = result.get("score_unit", "mw_h")
+    label = "EUR" if unit == "eur" else "MW h"
     draw = pd.read_csv(output_dir / "availability_draws.csv").query("bank == 'delivery'").iloc[0]
     lines = ["# FPP gain selection on matched scenarios", "",
         "Each design case supplies the same availability vector and disturbance to every gain pair. "
-        "The private score is the sum of the raise and lower settlement coefficients in MW h. "
+        f"The private score is {result['score']} [{label}]. "
         "All metered units and the accounting residual settle with the raw negative frequency error.", "",
         f"The design table selected a {result['kind']} equilibrium within the catalogue {result['catalogue']}. "
         "Each follower applies its episode gain to the current frequency at 0.1 s intervals.", "",
-        "| Player | Design probabilities in catalogue order | Design deviation gain [MW h] | Delivery gain |",
+        f"| Player | Design probabilities in catalogue order | Design deviation gain [{label}] | Delivery gain |",
         "|---|---|---:|---:|"]
     for i, identity in enumerate(result["players"]):
         lines.append(f"| {identity} | {result['probabilities'][identity]} | "
-                     f"{result['design_gaps_mw_h'][i]:.6g} | {draw[f'theta_{i+1}']:.6g} |")
+                     f"{result[f'design_gaps_{unit}'][i]:.6g} | {draw[f'theta_{i+1}']:.6g} |")
+    if unit == "eur":
+        prices = result["prices"]
+        lines += ["", f"Raise/lower prices are {prices['raise_per_mw_h']:g}/{prices['lower_per_mw_h']:g} "
+            "EUR/(MW h), explicitly illustrative and uncalibrated. The private cost is the solver-integrated "
+            f"rho*z(t)^2/2 of delivered response, with rho {result['activation_cost_rho_eur_per_mw2_s']} "
+            "in EUR/(MW^2 s). Scenario tables retain revenue, cost and net payoff separately. "
+            "This cost is a resource cost, outside the balanced transfer ledger."]
+    if result.get("settlement_profile") == IDEAL_PROFILE:
+        lines += ["", "Ideal measurements use the full numerical trajectory with no four-second clock. "
+            "Directional performance uses time-weighted trapezoidal quadrature; RCR is the directional "
+            "maximum on that grid. Delivery refinement checks discretization. The 0.1 s causal target "
+            "decision clock remains fixed."]
     lines += ["", f"The representative delivery used the {draw['path']} disturbance path. "
         "The independent holdout evaluates every unilateral gain against the frozen opponent mixture. "
         "holdout_deviations.csv gives paired mean gains, standard errors and approximate simultaneous "
@@ -541,7 +608,7 @@ def write_gain_analysis(output_dir, summary, status):
         "with no averaging window. The statistic is maximum absolute RoCoF over the simulated horizon.", "",
         f"The study used {status['integrations']} integrations in {status['simulation_and_export_wall_s']:.2f} s. "
         "gain_equilibrium.json records design and holdout timings. The assessment and delivery metrics "
-        "use fresh cases after policy selection. Prices and activation costs are separate from gain selection."]
+        "use fresh cases after policy selection."]
     (output_dir / "ANALYSIS.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

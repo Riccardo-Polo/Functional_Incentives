@@ -6,26 +6,69 @@ The maintained command selects the two renewable followers' gain policies
 before delivery. The FPP-specific preset declares fixed FCR offers of 4 MW
 from each conventional provider at 15, 18 and 24 EUR/MW per block. Both
 renewables submit zero FCR offers. Clearing supplies 12 MW and fixes the roles
-before availability is sampled. The catalogue is `[0, 0.5, 1, 1.5, 2]`.
-Costs and optional monetary settlements remain separate accounting outputs.
+before availability is sampled. The catalogue is `[0, 0.5, 1, 1.5, 2, 3, 4]`.
+The private objective includes the same delivered-power cost as FI. The
+maintained settlement profile is `ideal_frequency_net_profit` (D-039).
 
 ```powershell
-.\.venv\Scripts\python.exe scripts/run_fcr.py --fpp-benchmark --config configs/aemo_fpp_metered.toml --output-dir results/fpp_gain_game
-.\.venv\Scripts\python.exe scripts/run_fcr.py --fpp-report results/fpp_gain_game
+.\.venv\Scripts\python.exe scripts/run_fcr.py --fpp-benchmark --config configs/aemo_fpp_metered.toml --output-dir results/fpp_economic_benchmark
+.\.venv\Scripts\python.exe scripts/run_fcr.py --fpp-report results/fpp_economic_benchmark
 ```
 
 For each candidate pair the plant starts at the same solved point and reuses
 every provider availability and the entire disturbance path of the design case.
 Both controllers react to the resulting common frequency. At tick k a provider
 computes `clip(-theta * K * db(e_k), -A, A)`, then holds the target for 0.1 s.
-The score is the sum of its two signed CF × RCR / 12 coefficients in MW h.
-Ideal FM equals minus the measured frequency error at each 4 s sample. Every
-finite sample enters its direction directly. Empty directions have zero scores,
-RCR and coefficients. The accounting residual closes each directional ledger.
+For each joint scenario the private score, in EUR, is
+
+$$\pi_i(\theta_i,\theta_{-i})=
+\sum_j\sum_{d\in\{+,-\}}p^d B_{i,j}^d
+-\frac{\rho_i}{2}\int_0^H z_i(t)^2\,dt.$$
+
+Here B is the signed CF × RCR / 12 coefficient [MW h] per 300 s interval.
+The cost uses **delivered response**, integrated as a live solver ledger, not
+the target or theta itself. The simulator uses the existing per-second rho.
+Under D-040 the input `game.activation_cost.quadratic_eur_per_mw2_h` declares
+an hourly coefficient k_i for each player. The loader converts rho_i=k_i/3600
+exactly once and applies the same resource cost to FI and FPP in this preset.
+Both renewables use k=50 EUR/(MW² h), or rho=1/72 EUR/(MW² s).
+At delivered power 1 MW, the marginal cost is 50 EUR/MWh and the five-minute
+cost is 2.083333 EUR. This is a quadratic resource-cost proxy, not a linear
+energy payment or a measured technology cost. Hourly and per-second declarations
+in the same follower setup are rejected as ambiguous.
+
+The declared synthetic raise/lower prices are both 12 EUR/(MW h), with provenance in
+`game.prices` in `configs/fpp_followers.toml`. The scenario anchor is a factor-two
+activated-service premium over the illustrative FCR hourly scale: its 24
+EUR/MW four-hour block price corresponds to 6 EUR/(MW h). This is a stated
+scale assumption, not a pricing identity between the two products. For
+CF=1 and RCR=1 MW, one five-minute FPP interval pays 1 EUR. The /12 conversion
+is already in the settlement coefficient and is not applied again.
+These are illustrative monetary
+scales, not calibrated AEMO prices or an implicit currency conversion. Selection
+maximizes each player's mean net payoff; revenue and cost are exported separately.
+Changing this scale relative to rho can change the selected gains, including
+opting out at theta=0. It is not a calibrated commercial-profit comparison.
+
+Ideal FM equals minus the instantaneous model frequency error, with no
+four-second measurement clock, filter memory, reliability or alignment gates.
+Directional performance is the time integral of `max(-delta_f,0)*d_i` for raise
+and `min(-delta_f,0)*d_i` for lower, approximated by trapezoidal quadrature over
+the full numerical trajectory, including exact interval boundaries. Its units
+are MW Hz s (`performance_mw_hz_s`). Time weights handle nonuniform grids and
+off-clock events. RCR is the directional maximum on the same grid; numerical
+refinement checks both coefficients and RCR. Both interval endpoints enter
+quadrature without double-counting duration. Numerical discretization is not a
+measurement cadence. Current overlays use a 0.0125 s numerical output step;
+delivery checks halve it and the solver step and tighten tolerances. The
+0.1 s causal target decision clock stays fixed.
+Empty directions have zero performance, RCR and coefficients. The accounting
+residual closes each directional **transfer** ledger; internal resource costs
+are outside that zero-sum ledger.
 
 The two private mean-score tables are evaluated by columns for player 1 and
 by rows for player 2. The selector chooses the first pure mutual best response
-in ascending catalogue order, using a numerical tolerance of 1e-10 MW h.
+in ascending catalogue order, using a numerical tolerance of 1e-10 EUR.
 When no pure profile qualifies it enumerates supports, solves linear feasibility
 problems for independent mixtures, and verifies the two deviation gaps.
 A mixed policy draws one gain per player per episode, before that episode's
@@ -37,7 +80,8 @@ observe their own capacity and current frequency. Seed children 0, 1 and 2
 supply assessment, delivery and design cases respectively. Children 3 and 4
 select episode gains for assessment and delivery. `design_scenarios.csv`
 and `availability_draws.csv` record the full draws and path IDs.
-`{design,assessment}_gain_scores.csv` record each paired score and the matching
+`{design,assessment}_gain_scores.csv` record each paired `score_i_eur`,
+`revenue_i_eur`, `activation_cost_i_eur` and `coefficient_i_mw_h`; the matching
 `*_gain_payoffs.csv` give the two mean tables. `gain_equilibrium.json` stores
 the frozen distributions, pure candidates, numerical gaps, and separate training
 and holdout timings. `holdout_deviations.csv` retains paired gains and uncertainty
@@ -45,7 +89,7 @@ for every unilateral deviation on fresh cases. The design equilibrium applies
 to the finite catalogue and design bank. The representative realization and
 holdout uncertainty have separate interpretations.
 
-The default counts give 200 design and 200 holdout profile evaluations, then 27
+The default counts give 392 design and 392 holdout profile evaluations, then 27
 comparison integrations and three numerical refinements. An entirely undisturbed
 design or holdout case has exactly zero score for every profile at the solved
 equilibrium. These cases are counted in the averages and recorded separately
@@ -53,8 +97,22 @@ from numerical integrations. Each comparison uses
 the same physical draw for FCR, FI and FPP. A prescribed reversal, if present,
 overrides only the delivery path. Saved legacy overlays with the historical
 source profile retain continuous fixed droop and the original FM rules.
+The saved `ideal_frequency_gain_game` profile retains the previous raw-frequency
+four-second measurements and coefficient-only objective for historical replay.
+Old score caches cannot supply payoffs for the new profile. Earlier studies
+and slides are preserved; their (2,2)/(4,4) equilibria do not describe this game.
 
 ### Paired comparison with the previous follower
+
+The 6 November 2026 theta diagnostic in `results/fpp_theta_cost/` compares
+revenue-only and net-profit selection on exactly the same current ideal
+trajectories and original 8+8 joint cases. The expanded catalogue reaches 4.
+Revenue-only selects (4,4); net profit selects (0,0). The paired holdout means
+favor the frozen choices, with wide uncertainty intervals. These are empirical
+finite-catalogue results for the illustrative prices/costs, not a continuous
+or population equilibrium. Gains strictly between 0 and 0.5 were not tested.
+The report and `theta_payoff.png/pdf` show the revenue/cost/payoff decomposition.
+This diagnostic changes no maintained preset or physical equation.
 
 Use a completed gain study as the source and a separate new directory for the
 controller comparison. The command loads the frozen episode gains and the
@@ -261,7 +319,7 @@ properties throughout the segment. Unbalanced, infeasible or unsolved-initial
 schedules are rejected; capacity/distributions are never reduced to make them fit.
 Delivered total power is also checked against explicit active-power limits.
 
-## Measurement, FM and settlement
+## Historical source-profile measurement, FM and settlement
 
 Intervals own their right endpoint: (0,300], (300,600], etc. The counted times
 are 4,8,...,300 and 304,...,600. The solver evaluates exact settlement times
@@ -316,7 +374,7 @@ compute payment=B_i*price with price in currency/(MW h). Gross rewards and
 positive charge magnitudes are formed from each signed directional interval
 payment before aggregation. Keep the residual when checking balance.
 
-## Economic inputs and interpretation
+## Historical economic inputs and interpretation
 
 The initial experiment deliberately supplies no prices. This avoids selecting
 prices to obtain a preferred FI/FPP ranking or treating a unit-price normalization
