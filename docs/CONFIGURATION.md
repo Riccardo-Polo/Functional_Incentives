@@ -1,5 +1,82 @@
 # Configuring the current implementation
 
+For the 18 November reference-budget study, `configs/fi_budget.toml` specifies
+the gradual disturbance rise time, event profiles and design matching tolerance.
+The baseline budget comes from clearing the retained 12 MW reference. Each
+candidate mixed policy has its own recomputed FI settlement.
+See [the study protocol](FI_BUDGET.md).
+
+The retained study reference (16 November, D-046) is the traditional fleet
+with 4 MW reserve caps and the accepted uncertain-renewable underlying variance
+1.75 MW^2. The 8 MW conventional expansion is a separate completed sensitivity.
+This decision does not overwrite the historical `configs/fcr.toml` preset.
+
+For FCR demand sensitivities up to 20 MW, use `--fcr-capacity-study` with
+`configs/fcr_capacity.toml` (original reserve laws) or
+`configs/fcr_capacity_expanded.toml` (explicit conventional reserve expansion).
+Use separate outputs under `results/fcr_capacity/original` and `expanded`.
+The latter changes conventional capacity/mean to 8/7.98 MW while preserving
+all other parameters. Policies remain gamma=50/lambda2=30000. New figures show
+only peak absolute RoCoF, not time-series RoCoF. Report-only regeneration is
+`--fcr-capacity-report STUDY_DIR`. See [FCR_CAPACITY_STUDY.md](FCR_CAPACITY_STUDY.md).
+
+The frozen-policy L2/bilinear/FCR comparison uses `--lyapunov-compare --config
+configs/lyapunov_comparison.toml --output-dir results/lyapunov_comparison`.
+The manifest references the reduced-uncertainty design, declares explicit
+curve-based lambda2/gamma choices, independent delivery seed, unseen event
+profiles and conditional event-count accounting scenarios. It does not change
+the source studies or weighted optimizer. `--lyapunov-comparison-report
+results/lyapunov_comparison` regenerates saved reports without integration.
+See [LYAPUNOV_COMPARISON.md](LYAPUNOV_COMPARISON.md) for the distinction between
+design expected budget equality and independent realized spending gaps.
+
+## Single-provider Lyapunov L2 study
+
+The separate-clock experiment exposes `l2_settlement_interval_s` in the common
+simulation API with the original `endpoint_only_v1` contract. Control stays at
+`fi_decision_interval_s=0.1`; settlement is 0.25 or 0.5 s and the provider replans
+to closure. This is an opt-in API/study setting, not a new main CLI manifest
+field or default. See [L2_SEPARATE_CLOCKS.md](L2_SEPARATE_CLOCKS.md).
+
+New runs default to `l2_contract = "passive_cost_compensated_v1"` and must use
+a fresh output directory, for example `results/lyapunov_l2_compensated/`.
+The optional top-level manifest setting `l2_contract = "endpoint_only_v1"`
+selects historical settlement explicitly. Unversioned saved source plans keep
+their historical endpoint-only meaning in source-based comparison runners.
+Do not reuse old budget matches or coefficient-selection claims for the new
+contract without a new study. The commands below locate historical studies.
+
+Use `--lyapunov-study --config configs/lyapunov.toml --output-dir
+results/lyapunov_l2_week10`. The manifest selects the preserved `fi_endogenous`
+fleet, paired design/validation availability banks, declared synthetic disturbance
+profiles and separate lambda2/gamma grids. Lambda2 is in EUR/Hz^2 per decision
+interval; it is not numerically interchangeable with bilinear gamma.
+`workers=3` runs independent fixed-draw design integrations in process workers.
+Exact disturbance instants supplement the output grid for sampled extrema.
+
+The separate `configs/lyapunov_lower_uncertainty.toml` sensitivity references
+`results/lyapunov_l2_week10/` and overrides only
+`provider_overrides.renewable_uncertain.variance_mw2=1.75` (original: 4 MW^2).
+Run it with `--lyapunov-study --config configs/lyapunov_lower_uncertainty.toml
+--output-dir results/lyapunov_l2_lower_uncertainty`. Other manifest settings
+must match the reference. Both banks are paired by bounded-law CDF/inverse-CDF
+quantiles; unchanged providers retain their exact saved draws. Offers and
+clearing are recomputed and must match, including the voluntary zero FCR offer.
+Mean, costs, penalty, minimum bid, coefficient grids, n=4 and the 95% interval
+formula stay fixed. The reference is preserved in place and checked by hashes.
+
+The TSO chooses lambda2 explicitly from design Pareto curves. Without a
+`[selection]` table the run completes design and numerical checks, then saves
+`awaiting_tso_selection`. After inspection, add tested `lambda2`, tested `gamma`
+and a nonempty `reason` to `[selection]` and rerun the same command. Choices
+freeze before independent evaluation and cannot be changed using that holdout.
+The separate weighted optimizer is not used by this experiment.
+
+Use `--lyapunov-report results/lyapunov_l2_week10` to regenerate PNG figures,
+summaries and `ANALYSIS.md` with no simulation. Existing physical and bilinear
+settings remain unchanged. See [LYAPUNOV_STUDY.md](LYAPUNOV_STUDY.md) for model
+equations, causal information, replay accounting, profile rationale and checks.
+
 Use `scripts/run_fcr.py` with [configs/fcr.toml](../configs/fcr.toml).
 The runner also accepts the `effective_config.json` saved by any current run.
 There are no separate teaching, linear-frequency or market-stage runners.

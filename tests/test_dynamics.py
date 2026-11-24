@@ -349,7 +349,11 @@ class FIDynamicsTests(unittest.TestCase):
     def test_output_clock_is_independent_and_final_partial_interval_is_settled(self):
         fine = self.simulate(output_time_step_s=.05)
         coarse = self.simulate(output_time_step_s=2)
-        self.assertEqual(fine.fi.intervals, coarse.fi.intervals)
+        # Runtime observations vary between executions; physical/economic
+        # interval records must remain exactly independent of the output grid.
+        scientific = lambda records: tuple({k: v for k, v in record.items()
+            if k not in ("decision_wall_s", "replay_wall_s")} for record in records)
+        self.assertEqual(scientific(fine.fi.intervals), scientific(coarse.fi.intervals))
         self.assertEqual(fine.fi.profit_eur[-1, 0], coarse.fi.profit_eur[-1, 0])
         self.assertEqual(fine.integrated_squared_frequency_error_hz2_s[-1],
                          coarse.integrated_squared_frequency_error_hz2_s[-1])
@@ -381,6 +385,222 @@ class FIDynamicsTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "fi_decision_interval_s"):
                 simulate_fcr_power_step(self.physical, [self.fi], **self.event,
                     output_time_step_s=.1, fi_decision_interval_s=interval)
+
+
+class L2DynamicsTests(unittest.TestCase):
+    def test_single_target_replans_to_closure_and_matches_scalar_decision(self):
+        from functional_incentives.decision import choose_l2_target
+        from functional_incentives.providers import FIProviderParameters
+        trace = self.run_case(l2_contract="endpoint_only_v1", l2_settlement_interval_s=.3)
+        for window in trace.l2.intervals:
+            for record in window["control_decisions"]:
+                self.assertEqual(record["control_policy"], "single_target")
+                self.assertEqual(len(record["plan_targets_mw"]), 1)
+                duration = window["end_time_s"] - record["time_s"]
+                self.assertAlmostEqual(record["plan_durations_s"][0], duration)
+                provider = FIProviderParameters("fi", .25, 3., 50., 1/72)
+                expected = choose_l2_target(provider, duration_s=duration,
+                    l2_contract="endpoint_only_v1", weight_eur_per_hz2=10000,
+                    sampled_frequency_error_hz=record["sampled_frequency_error_hz"],
+                    sampled_rocof_hz_per_s=record["sampled_rocof_hz_per_s"],
+                    frequency_mass_mw_s_per_hz=2*4*1000/60,
+                    initial_response_mw=record["initial_response_mw"])
+                self.assertAlmostEqual(record["target_mw"], expected.target_mw)
+        legacy = self.run_case(l2_contract="endpoint_only_v1",
+            l2_settlement_interval_s=.3, l2_control_policy="sequence")
+        self.assertTrue(any(len(d["plan_targets_mw"]) > 1
+            for w in legacy.l2.intervals for d in w["control_decisions"]))
+
+    def test_separate_clocks_match_original_at_equal_period(self):
+        original=self.run_case(l2_contract="endpoint_only_v1")
+        split=self.run_case(l2_contract="endpoint_only_v1",l2_settlement_interval_s=.1)
+        np.testing.assert_allclose(original.frequency_hz,split.frequency_hz,atol=1e-8,rtol=0)
+        np.testing.assert_allclose(original.l2.net_settlement_eur,split.l2.net_settlement_eur,atol=1e-6,rtol=0)
+
+    def test_separate_clocks_replay_continuity_and_off_control_settlement(self):
+        trace=self.run_case(((1.05,-7.),),l2_contract="endpoint_only_v1",l2_settlement_interval_s=.25)
+        records=trace.l2.intervals
+        self.assertAlmostEqual(records[0]['end_time_s'],.25)
+        self.assertAlmostEqual(records[-1]['end_time_s'],2.037)
+        decisions=[d for r in records for d in r['control_decisions']]
+        np.testing.assert_allclose([d['time_s'] for d in decisions],np.arange(0,2.037,.1),atol=1e-10)
+        # Closing at .25 must neither update the target nor restart replay at .3.
+        self.assertAlmostEqual(trace.provider_requested_response_mw[26,1],decisions[2]['target_mw'])
+        self.assertAlmostEqual(trace.l2.net_settlement_eur[24,0],0.)
+        for r in records:
+            h=r['end_time_s']-r['start_time_s']
+            self.assertAlmostEqual(r['passive_final_response_mw'],r['initial_response_mw']*np.exp(-h/.25),delta=1e-8)
+            self.assertAlmostEqual(r['net_settlement_eur'],10000*(r['actual_passive_endpoint_hz']**2-r['actual_endpoint_hz']**2),places=8)
+        self.assertAlmostEqual(trace.l2.net_settlement_eur[-1,0],sum(r['net_settlement_eur'] for r in records),places=8)
+        fine=self.run_case(((1.05,-7.),),l2_contract="endpoint_only_v1",l2_settlement_interval_s=.25,
+                           maximum_solver_step_s=.0125,relative_tolerance=1e-11,absolute_tolerance=1e-13)
+        np.testing.assert_allclose(trace.l2.net_settlement_eur,fine.l2.net_settlement_eur,atol=1e-6,rtol=0)
+
+    def test_separate_clock_decisions_are_causal_and_invalid_contract_rejected(self):
+        changed=self.run_case(((1.05,-7.),),l2_contract="endpoint_only_v1",l2_settlement_interval_s=.5)
+        unchanged=self.run_case(l2_contract="endpoint_only_v1",l2_settlement_interval_s=.5)
+        a=[d for r in changed.l2.intervals for d in r['control_decisions']]
+        b=[d for r in unchanged.l2.intervals for d in r['control_decisions']]
+        for x,y in zip(a,b):
+            if x['time_s']<=1.:
+                self.assertAlmostEqual(x['target_mw'],y['target_mw'],places=9)
+        # Full replay window agrees with independent plant integration.
+        from scipy.integrate import solve_ivp
+        record=changed.l2.intervals[2]
+        t=record['start_time_s']
+        initial=[np.interp(t,changed.time_s,changed.delta_frequency_hz),
+                 np.interp(t,changed.time_s,changed.provider_response_mw[:,0]),record['initial_response_mw']]
+        def rhs(time,y):
+            deficit=10. if time<1.05 else -7.
+            return [(-15*y[0]-deficit+y[1]+y[2])/(2*4*1000/60),
+                    (-y[1]+np.clip(-300*y[0],-8,8))/2,-y[2]/.25]
+        first=solve_ivp(rhs,(1.,1.05),initial,rtol=1e-11,atol=1e-13)
+        second=solve_ivp(rhs,(1.05,1.5),first.y[:,-1],rtol=1e-11,atol=1e-13)
+        self.assertAlmostEqual(record['actual_passive_endpoint_hz'],second.y[0,-1],delta=1e-8)
+        with self.assertRaisesRegex(ValueError,"Separate L2 clocks"):
+            self.run_case(l2_settlement_interval_s=.5)
+
+    def test_compensation_preserves_controls_and_reconciles_transfers(self):
+        current = self.run_case(((1.05, -7.),))
+        legacy = self.run_case(((1.05, -7.),), l2_contract="endpoint_only_v1")
+        np.testing.assert_allclose(current.frequency_hz, legacy.frequency_hz, atol=1e-9, rtol=0)
+        np.testing.assert_allclose(current.provider_requested_response_mw,
+                                   legacy.provider_requested_response_mw, atol=1e-8, rtol=0)
+        reimbursement = 0.
+        for new, old in zip(current.l2.intervals, legacy.l2.intervals, strict=True):
+            h = new["end_time_s"]-new["start_time_s"]
+            expected = (1/72)*new["initial_response_mw"]**2*.25*(-np.expm1(-2*h/.25))/4
+            self.assertAlmostEqual(new["passive_cost_reimbursement_eur"], expected, places=12)
+            self.assertAlmostEqual(new["net_settlement_eur"],
+                new["performance_payment_eur"]+expected, places=10)
+            self.assertAlmostEqual(new["performance_payment_eur"], old["net_settlement_eur"], delta=1e-7)
+            self.assertGreaterEqual(new["predicted_profit_eur"], -1e-10)
+            reimbursement += expected
+        self.assertGreater(reimbursement, 0.)
+        self.assertAlmostEqual(current.l2.net_settlement_eur[-1, 0]-legacy.l2.net_settlement_eur[-1, 0],
+                               reimbursement, delta=1e-7)
+
+    def test_zero_target_with_inherited_response_has_zero_realized_profit(self):
+        from dataclasses import replace
+        from unittest.mock import patch
+        from functional_incentives.decision import choose_l2_target
+        calls = 0
+        def stop_after_activation(provider, **kwargs):
+            nonlocal calls
+            calls += 1
+            decision = choose_l2_target(provider, **kwargs)
+            if calls <= 10:
+                return decision
+            passive = decision.passive_activation_cost_eur
+            return replace(decision, target_mw=0., predicted_settlement_eur=passive,
+                           predicted_activation_cost_eur=passive, predicted_performance_payment_eur=0.)
+        with patch("functional_incentives.simulation.choose_l2_target", side_effect=stop_after_activation):
+            trace = self.run_case()
+        records = trace.l2.intervals[10:]
+        self.assertGreater(records[0]["initial_response_mw"], .1)
+        for record in records:
+            self.assertEqual(record["target_mw"], 0.)
+            self.assertAlmostEqual(record["performance_payment_eur"], 0., delta=1e-8)
+            self.assertAlmostEqual(record["profit_eur"], 0., delta=1e-8)
+
+    def test_harmful_target_retains_performance_penalty_and_net_charge(self):
+        from dataclasses import replace
+        from unittest.mock import patch
+        from functional_incentives.decision import choose_l2_target
+        def harmful(provider, **kwargs):
+            return replace(choose_l2_target(provider, **kwargs), target_mw=-provider.reserve_mw)
+        with patch("functional_incentives.simulation.choose_l2_target", side_effect=harmful):
+            trace = self.run_case(final_time_s=.1, start_time_s=0.)
+        record = trace.l2.intervals[0]
+        self.assertEqual(record["passive_cost_reimbursement_eur"], 0.)
+        self.assertLess(record["performance_payment_eur"], 0.)
+        self.assertGreater(record["performance_penalty_eur"], 0.)
+        self.assertLess(record["net_settlement_eur"], 0.)
+        self.assertLess(record["profit_eur"], 0.)
+
+    def test_causal_ramps_overlap_and_passive_replay_uses_same_disturbance(self):
+        plant = LinearFrequencyParameters(60., 5., 60., 0.)
+        options = dict(power_deficit_mw=10., start_time_s=.07, power_deficit_changes=[(.16, -4.)],
+            disturbance_rise_s=.25, final_time_s=.53, output_time_step_s=.01, maximum_solver_step_s=.01)
+        trace = simulate_fcr_power_step(plant, (), **options)
+        t = trace.time_s
+        deficit = 10 * np.clip((t-.07)/.25, 0, 1) - 14 * np.clip((t-.16)/.25, 0, 1)
+        np.testing.assert_allclose(trace.power_deficit_mw, deficit, atol=1e-12)
+        np.testing.assert_allclose(trace.rocof_hz_per_s, -deficit / plant.frequency_mass_mw_s_per_hz)
+        def ramp_integral(start):
+            return (np.maximum(t-start, 0)**2 - np.maximum(t-start-.25, 0)**2) / .5
+        expected = -(10*ramp_integral(.07) - 14*ramp_integral(.16)) / plant.frequency_mass_mw_s_per_hz
+        np.testing.assert_allclose(trace.delta_frequency_hz, expected, atol=1e-11)
+        fi = FIProviderParameters("fi", .25, 2., 0., 1.)
+        passive = simulate_fcr_power_step(plant, (fi,), **options, fi_decision_interval_s=.1,
+                                          l2_weight_eur_per_hz2=0.)
+        np.testing.assert_allclose(passive.delta_frequency_hz, expected, atol=1e-11)
+        np.testing.assert_allclose(passive.l2.net_settlement_eur, 0.)
+        for record in passive.l2.intervals:
+            self.assertAlmostEqual(record["actual_passive_endpoint_hz"], record["actual_endpoint_hz"], places=11)
+        self.assertEqual(len(passive.l2.intervals), 6)
+        for corner in passive.disturbance_limits:
+            self.assertAlmostEqual(corner["rocof_left_hz_per_s"], corner["rocof_right_hz_per_s"])
+    def run_case(self, changes=(), **overrides):
+        from functional_incentives.providers import FIProviderParameters
+        plant = LinearFrequencyParameters(60, 4, 1000, 15)
+        providers = (FCRProviderParameters("fcr", 300., 2., 8.),
+                     FIProviderParameters("fi", .25, 3., 50., 1/72))
+        options = dict(power_deficit_mw=10., start_time_s=.13, final_time_s=2.037,
+                       output_time_step_s=.01, maximum_solver_step_s=.025,
+                       fi_decision_interval_s=.1, power_deficit_changes=changes,
+                       l2_weight_eur_per_hz2=10000.)
+        return simulate_fcr_power_step(plant, providers, **{**options, **overrides})
+
+    def test_l2_causality_interval_ledgers_and_short_final_interval(self):
+        trace = self.run_case(((1.05, -7.),))
+        prefix = self.run_case()
+        self.assertIsNone(trace.fi)
+        records = trace.l2.intervals
+        self.assertEqual(len(records), 21)
+        self.assertAlmostEqual(records[-1]["end_time_s"]-records[-1]["start_time_s"], .037)
+        self.assertAlmostEqual(records[10]["target_mw"], prefix.l2.intervals[10]["target_mw"])
+        self.assertNotAlmostEqual(records[11]["sampled_rocof_hz_per_s"],
+                                 prefix.l2.intervals[11]["sampled_rocof_hz_per_s"])
+        self.assertLessEqual(np.max(abs(trace.provider_requested_response_mw[:, 1])), 3.)
+        self.assertLessEqual(np.max(abs(trace.provider_response_mw[:, 1])), 3.+1e-8)
+        for field in ("gross_rewards_eur", "gross_penalties_eur", "activation_cost_eur"):
+            self.assertAlmostEqual(getattr(trace.l2, field)[-1, 0], sum(r[field] for r in records), places=10)
+        for r in records:
+            self.assertAlmostEqual(r["passive_final_response_mw"],
+                r["initial_response_mw"] * np.exp(-(r["end_time_s"]-r["start_time_s"])/.25), delta=1e-8)
+            self.assertAlmostEqual(r["net_settlement_eur"], 10000.*(
+                r["actual_passive_endpoint_hz"]**2-r["actual_endpoint_hz"]**2)
+                + r["passive_cost_reimbursement_eur"], places=9)
+            self.assertAlmostEqual(r["activation_cost_eur"], r["predicted_activation_cost_eur"], delta=1e-8)
+        self.assertEqual(trace.l2.net_settlement_eur[29, 0], 0.)
+        self.assertNotEqual(trace.l2.net_settlement_eur[30, 0], 0.)
+        np.testing.assert_allclose(trace.total_fi_response_mw, trace.provider_response_mw[:, 1])
+
+    def test_l2_replay_uses_responsive_fcr_and_full_initial_state(self):
+        from scipy.integrate import solve_ivp
+        trace = self.run_case()
+        record = trace.l2.intervals[12]
+        initial = np.array([np.interp(1.2, trace.time_s, trace.delta_frequency_hz),
+                            np.interp(1.2, trace.time_s, trace.provider_response_mw[:, 0]),
+                            record["initial_response_mw"]])
+        def rhs(t, y):
+            return [(-15*y[0]-10+y[1]+y[2])/(2*4*1000/60),
+                    (-y[1]+np.clip(-300*y[0], -8, 8))/2, -y[2]/.25]
+        independent = solve_ivp(rhs, (1.2, 1.3), initial, rtol=1e-12, atol=1e-14)
+        self.assertAlmostEqual(record["actual_passive_endpoint_hz"], independent.y[0, -1], delta=1e-9)
+
+    def test_l2_zero_weight_and_numerical_refinement(self):
+        zero = self.run_case(l2_weight_eur_per_hz2=0.)
+        np.testing.assert_array_equal(zero.total_fi_response_mw, 0.)
+        np.testing.assert_array_equal(zero.l2.net_settlement_eur, 0.)
+        base = self.run_case(((1.05, -7.),))
+        fine = self.run_case(((1.05, -7.),), maximum_solver_step_s=.0125,
+                             relative_tolerance=1e-11, absolute_tolerance=1e-13)
+        np.testing.assert_allclose(base.frequency_hz, fine.frequency_hz, atol=1e-8, rtol=0)
+        np.testing.assert_allclose(base.l2.net_settlement_eur, fine.l2.net_settlement_eur, atol=1e-7, rtol=0)
+        with self.assertRaisesRegex(ValueError, "L2 requires"):
+            self.run_case(l2_weight_eur_per_hz2=-1.)
 
 
 class NormalizedDroopTests(unittest.TestCase):

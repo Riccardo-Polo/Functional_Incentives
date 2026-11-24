@@ -1,0 +1,20 @@
+# User-authorized illustrative reserve expansion, 16 November 2026.
+# Reserve capability and underlying availability means change together.
+# Dispatch, inertia, gains, response times, variances and economics stay fixed.
+source_comparison = "../results/lyapunov_comparison"
+fleet_label = "Expanded conventional reserve availability"
+requirements_mw = [12, 12.5, 13, 13.5, 14, 16, 18, 20]
+workers = 3
+events_per_block = 1
+
+[provider_overrides.conventional_1]
+reserve_capacity_mw = 8.0
+mean_mw = 7.98
+
+[provider_overrides.conventional_2]
+reserve_capacity_mw = 8.0
+mean_mw = 7.98
+
+[provider_overrides.conventional_3]
+reserve_capacity_mw = 8.0
+mean_mw = 7.98

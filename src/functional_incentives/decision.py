@@ -9,7 +9,8 @@ from scipy.optimize import minimize_scalar
 
 from .availability import GaussianReserve
 from .providers import QuadraticCommitmentCost, FIProviderParameters, first_order_response_integrals
-from .incentives import predict_fi_financials
+from .incentives import (predict_fi_financials, l2_endpoint_payment, l2_passive_cost,
+                         L2_CONTRACT, validate_l2_contract)
 from .market import FCRCapacityOffer
 
 
@@ -116,6 +117,111 @@ class FITargetDecision:
     @property
     def predicted_profit_eur(self) -> float:
         return self.predicted_settlement_eur - self.predicted_activation_cost_eur
+
+
+@dataclass(frozen=True)
+class L2TargetDecision:
+    target_mw: float
+    unconstrained_target_mw: float
+    alpha_hz: float
+    beta_hz_per_mw: float
+    predicted_settlement_eur: float
+    predicted_activation_cost_eur: float
+    predicted_performance_payment_eur: float
+    passive_activation_cost_eur: float
+    passive_cost_reimbursement_eur: float
+
+    @property
+    def predicted_profit_eur(self):
+        return self.predicted_settlement_eur - self.predicted_activation_cost_eur
+
+
+def choose_l2_target(provider: FIProviderParameters, *, weight_eur_per_hz2: float,
+                     sampled_frequency_error_hz: float, sampled_rocof_hz_per_s: float,
+                     frequency_mass_mw_s_per_hz: float, initial_response_mw: float,
+                     duration_s: float, l2_contract: str = L2_CONTRACT) -> L2TargetDecision:
+    """Week 9 causal affine predictor and exact quadratic delivered-power cost.
+
+    Other power-balance terms are frozen only in the predictor. Current model
+    RoCoF includes the own initial response, which must not be counted twice.
+    No future disturbance, FCR response or frequency enters this decision.
+    """
+    validate_l2_contract(l2_contract)
+    values = (weight_eur_per_hz2, sampled_frequency_error_hz, sampled_rocof_hz_per_s,
+              frequency_mass_mw_s_per_hz, initial_response_mw, duration_s)
+    if (not all(isfinite(x) for x in values) or weight_eur_per_hz2 < 0
+            or frequency_mass_mw_s_per_hz <= 0 or duration_s <= 0
+            or abs(initial_response_mw) > provider.reserve_mw + 1e-8):
+        raise ValueError("invalid L2 decision inputs")
+    _, b, aa, ab, bb = first_order_response_integrals(provider.time_constant_s, duration_s)
+    if bb <= 0:
+        raise ValueError("L2 interval is too small relative to the response time")
+    alpha = (sampled_frequency_error_hz + duration_s * sampled_rocof_hz_per_s
+             - b * initial_response_mw / frequency_mass_mw_s_per_hz)
+    beta = b / frequency_mass_mw_s_per_hz
+    rho = provider.rho_eur_per_mw2_s
+    unconstrained = -(2 * weight_eur_per_hz2 * beta * alpha + rho * ab * initial_response_mw) / (
+        2 * weight_eur_per_hz2 * beta**2 + rho * bb)
+    target = float(max(-provider.reserve_mw, min(provider.reserve_mw, unconstrained)))
+    cost = .5 * rho * max(0., aa * initial_response_mw**2
+                          + 2 * ab * initial_response_mw * target + bb * target**2)
+    performance = l2_endpoint_payment(weight_eur_per_hz2, alpha, alpha + beta * target)
+    passive_cost = l2_passive_cost(provider, initial_response_mw, duration_s)
+    reimbursement = passive_cost if l2_contract == L2_CONTRACT else 0.
+    payment = performance + reimbursement
+    if not all(isfinite(x) for x in (alpha, beta, unconstrained, cost, payment)):
+        raise ValueError("L2 decision produced a non-finite value")
+    return L2TargetDecision(target, float(unconstrained), float(alpha), float(beta), payment,
+                            float(cost), performance, passive_cost, reimbursement)
+
+
+def choose_l2_window_targets(provider: FIProviderParameters, *, durations_s,
+                            sampled_frequency_error_hz: float, sampled_rocof_hz_per_s: float,
+                            frequency_mass_mw_s_per_hz: float, initial_response_mw: float,
+                            weight_eur_per_hz2: float):
+    """Causal bounded plan to the next settlement, with exact actuator costs.
+
+    Freeze external balance as in the original affine predictor. Replan at
+    each control tick and apply only the first target. No terminal value beyond
+    settlement is imposed. Return the plan and predicted endpoint/cost.
+    """
+    import numpy as np
+    from scipy.optimize import lsq_linear
+    durations = np.asarray(durations_s, dtype=float)
+    if (durations.ndim != 1 or not len(durations) or np.any(durations <= 0)
+            or not np.all(np.isfinite(durations))):
+        raise ValueError("window plan requires positive finite durations")
+    values = [sampled_frequency_error_hz, sampled_rocof_hz_per_s,
+              frequency_mass_mw_s_per_hz, initial_response_mw, weight_eur_per_hz2]
+    if (not np.all(np.isfinite(values)) or frequency_mass_mw_s_per_hz <= 0
+            or weight_eur_per_hz2 < 0 or abs(initial_response_mw) > provider.reserve_mw+1e-8):
+        raise ValueError("invalid L2 window predictor inputs")
+    n = len(durations)
+    # q = [1, v_0, ..., v_(n-1)]; response and its integral are affine in q.
+    response = np.zeros(n+1); response[0] = initial_response_mw
+    energy = np.zeros(n+1); quadratic = np.zeros((n+1, n+1))
+    for i, h in enumerate(durations):
+        a, b, aa, ab, bb = first_order_response_integrals(provider.time_constant_s, h)
+        basis = np.eye(n+1)[i+1]
+        energy += a*response+b*basis
+        quadratic += aa*np.outer(response,response)+ab*(np.outer(response,basis)+np.outer(basis,response))+bb*np.outer(basis,basis)
+        decay = np.exp(-h/provider.time_constant_s)
+        response = decay*response+(1-decay)*basis
+    endpoint = energy/frequency_mass_mw_s_per_hz
+    endpoint[0] += (sampled_frequency_error_hz+durations.sum()*sampled_rocof_hz_per_s
+                    -durations.sum()*initial_response_mw/frequency_mass_mw_s_per_hz)
+    objective = weight_eur_per_hz2*np.outer(endpoint,endpoint)+provider.rho_eur_per_mw2_s*quadratic/2
+    if provider.reserve_mw == 0:
+        targets = np.zeros(n)
+    else:
+        chol = np.linalg.cholesky(objective[1:,1:])
+        answer = lsq_linear(chol.T, -np.linalg.solve(chol,objective[1:,0]),
+            bounds=(-provider.reserve_mw,provider.reserve_mw), tol=1e-12, max_iter=200)
+        if not answer.success:
+            raise RuntimeError("L2 window target optimization failed")
+        targets = answer.x
+    q = np.r_[1.,targets]
+    return targets, float(endpoint@q), float(provider.rho_eur_per_mw2_s*(q@quadratic@q)/2)
 
 
 def choose_fi_target(

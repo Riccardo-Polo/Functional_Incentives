@@ -1,0 +1,49 @@
+# Frozen-policy validation and conditional equal-budget procurement.
+# The prior design studies remain unchanged and are referenced in place.
+source_study = "../results/lyapunov_l2_lower_uncertainty"
+workers = 3
+delivery_seed = 20261115
+# Conditional accounting scenarios, not a forecast of event occurrence.
+# No FCR payment is prorated to the 40/60 s simulation horizon.
+events_per_block = [1, 4, 12]
+
+[selection]
+lambda2 = 30000
+gamma = 50
+reason = "Illustrative TSO curve-based compromise on the original equal-weight design mixture: gamma=50 captures about 93% of the best tested error reduction before the flat expensive region; lambda2=30000 is near the L2 error plateau and has positive empirical mean provider profit, whereas lambda2=10000 has negative mean profit. This is not a weighted optimum, a population guarantee or a new participation constraint. Other metric Pareto curves, including RoCoF, remain visible."
+
+[[demonstrations]]
+name = "moderate_sustained"
+label = "Moderate sustained deficit"
+purpose = "Unseen disturbance amplitude; sustained activation and residual error"
+start_time_s = 1.03
+power_deficit_mw = 5.0
+changes = []
+final_time_s = 60.0
+
+[[demonstrations]]
+name = "short_deficit_pulse"
+label = "Short deficit pulse"
+purpose = "Clearance before conventional response fully develops; equal-budget example"
+start_time_s = 1.03
+power_deficit_mw = 10.0
+changes = [[3.07, 0.0]]
+final_time_s = 40.0
+
+[[demonstrations]]
+name = "bipolar_doublet"
+label = "Balanced bipolar doublet"
+purpose = "Equal-duration opposite disturbances; inherited response and harmful contributions"
+start_time_s = 1.03
+power_deficit_mw = 10.0
+changes = [[3.07, -10.0], [5.11, 0.0]]
+final_time_s = 40.0
+
+[[demonstrations]]
+name = "staircase_recovery"
+label = "Staircase and recovery"
+purpose = "Escalating absolute deficit, saturation and release with retained actuator states"
+start_time_s = 1.03
+power_deficit_mw = 4.0
+changes = [[8.07, 8.0], [15.11, 12.0], [22.13, 6.0], [30.17, 0.0]]
+final_time_s = 60.0

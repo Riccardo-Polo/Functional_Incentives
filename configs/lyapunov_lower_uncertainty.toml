@@ -1,0 +1,56 @@
+# Paired variance sensitivity; the reference study stays unchanged in place.
+# Chosen before new frequency outcomes: variance 1.75 MW^2 retains a voluntary
+# zero FCR offer with margin. Mean, costs, penalty and minimum bid stay fixed.
+base_config = "fcr.toml"
+base_scenario = "fi_endogenous"
+reference_study = "../results/lyapunov_l2_week10"
+seed = 20261113
+design_samples = 4
+validation_samples = 16
+workers = 3
+final_time_s = 40.0
+output_time_step_s = 0.025
+maximum_solver_step_s = 0.05
+relative_tolerance = 1e-11
+absolute_tolerance = 1e-13
+lambda2_values = [0, 3000, 10000, 30000, 100000, 300000, 1000000]
+gamma_values = [0, 10, 25, 50, 100, 200, 300]
+
+[[profiles]]
+name = "sustained_deficit"
+label = "Sustained deficit"
+purpose = "Containment, residual frequency error and persistent activation cost"
+start_time_s = 1.0
+power_deficit_mw = 10.0
+changes = []
+weight = 0.25
+
+[[profiles]]
+name = "temporary_deficit"
+label = "Temporary deficit and recovery"
+purpose = "Unannounced clearance while conventional FCR and FI retain response"
+start_time_s = 1.03
+power_deficit_mw = 10.0
+changes = [[6.07, 0.0]]
+weight = 0.25
+
+[[profiles]]
+name = "deficit_to_surplus"
+label = "Deficit to surplus"
+purpose = "Opposite-direction service after the initial FCR response develops"
+start_time_s = 1.0
+power_deficit_mw = 10.0
+changes = [[20.05, -7.0]]
+weight = 0.25
+
+[[profiles]]
+name = "rapid_reversals"
+label = "Rapid reversals and recovery"
+purpose = "Actuator memory, changing benefit signs and causal forecast errors"
+start_time_s = 1.03
+power_deficit_mw = 10.0
+changes = [[3.07, -7.0], [4.23, 5.0], [6.11, 0.0]]
+weight = 0.25
+
+[provider_overrides.renewable_uncertain]
+variance_mw2 = 1.75

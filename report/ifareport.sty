@@ -1,0 +1,103 @@
+\setlength{\parindent}{0cm}
+
+\usepackage[backend=bibtex,style=numeric-comp]{biblatex}
+\usepackage{graphicx}
+\usepackage{epstopdf}
+\usepackage[latin1]{inputenc}
+\usepackage{fancyhdr}
+\usepackage{subcaption}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{amsthm}
+\usepackage{amssymb}
+\usepackage[T1]{fontenc}
+\usepackage{color}					
+
+\graphicspath{{graphics/}}
+\setcounter{secnumdepth}{2} \setcounter{tocdepth}{2}
+
+%% Bibliography %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%5
+\addbibresource{bibliography.bib}
+\AtEveryBibitem{\clearfield{issn}}
+\AtEveryCitekey{\clearfield{issn}}
+\AtEveryBibitem{\clearfield{isbn}}
+\AtEveryCitekey{\clearfield{isbn}}
+\AtEveryBibitem{\clearfield{doi}}
+\AtEveryCitekey{\clearfield{doi}}
+\AtEveryBibitem{\clearfield{url}}
+\AtEveryCitekey{\clearfield{url}}
+\AtEveryBibitem{\clearfield{eprint}}
+\AtEveryCitekey{\clearfield{eprint}}
+
+%% Page setup %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\textwidth=16cm
+\oddsidemargin=0cm
+\evensidemargin=0cm
+\topmargin=-1cm
+\textheight=24cm
+
+%% Configuration commands %%%%%%%%%%%%%%%%%%%%%%%%%%
+\renewcommand{\author}[1]{\def\@author{#1}}
+\renewcommand{\title}[1]{\def\@title{#1}}
+\renewcommand{\date}[1]{\def\@date{#1}}
+\newcommand{\thesistype}[1]{\def\@thesistype{#1}}
+\newcommand{\advisors}[1]{\def\@advisors{#1}}
+\def\@keywords{}
+\newcommand{\keywords}[1]{\def\@keywords{#1}}
+
+%% Hyperref %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\newcommand{\loadhyperref}{
+\usepackage[
+  colorlinks=true,        % links are colored
+  citecolor=black,        % color of cite links
+  linkcolor=black,        % color of hyperref links
+  menucolor=black,        % color of Acrobat Reader menu buttons
+  urlcolor=black,         % color of urls \url{}
+  bookmarks=true, hyperindex=true, breaklinks=true,
+  pdftitle={\@title},
+  pdfauthor={\@author},
+  pdfsubject={\@thesistype},
+  pdfkeywords={\@keywords}
+]{hyperref}
+}
+
+%% Cover %%%%%%%%%%%%%%%%%%%%%%
+\renewcommand{\maketitle}{
+\begin{figure}
+	\begin{subfigure}[b]{0.3\textwidth}
+		\includegraphics[width=1.0\textwidth]{utils/logos/ethlogo}
+	\end{subfigure}\hfill
+	\begin{subfigure}[b]{0.10\textwidth}
+		\includegraphics[width=1.0\textwidth]{utils/logos/ifalogo_color}
+	\end{subfigure}
+	\hspace*{0.2em} \Large{Automatic Control Laboratory}
+\end{figure}
+
+\begin{center}
+\vspace*{5cm}\LARGE \textbf{\@thesistype}\\
+\Huge \@title\\
+\vspace*{1cm}\large \@author\\
+\large \@date\\
+\vspace*{10cm} \large \textbf{Advisors}\\\@advisors
+\end{center}
+
+\clearpage
+}
+
+%% Page style %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\pagestyle{fancy}
+\renewcommand{\chaptermark}[1]{\markboth{\thechapter\ #1}{}}
+\renewcommand{\sectionmark}[1]{\markright{\thesection\ #1}}
+\fancyhf{}
+%\fancyhead[LE,RO]{\thepage}
+\fancyhead[RO]{\nouppercase\rightmark}  %gerade Seitenzahlen ist rechts Kapitel in der Kopfzeile
+\fancyhead[LE]{\nouppercase\rightmark} 	%ungerade Seitenzahlen ist links Section in der Kopfzeile
+\renewcommand{\headrulewidth}{0.5pt}
+\fancyfoot[LE,RO]{\thepage}            	%Seitenzahlen Fusszeile jeweils aussen
+%\renewcommand{\footrulewdith}{0pt}
+\addtolength{\headheight}{0.5pt}
+\fancypagestyle{plain}{}
+\fancyhead{}
+\renewcommand{\headrulewidth}{0pt}

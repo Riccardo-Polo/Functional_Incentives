@@ -14,6 +14,411 @@ from .frequency import FrequencyTrajectory
 from .simulation import AggregateFCRTrajectory
 
 
+def plot_capacity_study(output, protocol, summary, market, matches, comparisons):
+    """Demand comparisons with scalar trajectory-peak RoCoF only."""
+    from .fcr_capacity import BASE_POLICIES
+    colors = {"fcr_base": "#455565", "bilinear": "#bc5a32", "l2": "#007a92"}
+    names = {"fcr_base": "FCR only", "bilinear": "FCR + bilinear FI", "l2": "FCR + L2 FI"}
+    profiles = protocol["profiles"]
+    title = protocol["settings"]["fleet_label"]
+    valid = summary[summary.bank == "validation"]
+    rows = (len(profiles)+3)//4
+    def panels():
+        fig, axes = plt.subplots(rows, 4, figsize=(16, 3.4*rows), squeeze=False, constrained_layout=True)
+        for ax in list(axes.flat)[len(profiles):]:
+            ax.set_visible(False)
+        return fig, list(axes.flat)[:len(profiles)]
+    def save(fig, name):
+        fig.savefig(output / (name+".png"), dpi=160)
+        plt.close(fig)
+    with plt.rc_context({"font.size": 8, "axes.spines.top": False, "axes.spines.right": False,
+                         "axes.grid": True, "grid.alpha": .18}):
+        for field, label, filename in (
+                ("frequency_error_hz2_s", "Integrated squared error [Hz² s]", "capacity_frequency_error"),
+                ("nadir_sampled_hz", "Nadir [Hz]", "capacity_nadir"),
+                ("peak_absolute_error_hz", "Peak absolute frequency error [Hz]", "capacity_peak_error"),
+                ("rocof_max_abs_hz_per_s", "Mean trajectory peak |RoCoF| [Hz/s]", "capacity_peak_rocof"),
+                ("net_payment_eur", "Net FI transfer [EUR/event]", "capacity_fi_payments"),
+                ("profit_eur", "FI profit [EUR/event]", "capacity_fi_profit")):
+            fig, axes = panels()
+            for ax, p in zip(axes, profiles, strict=True):
+                for policy in BASE_POLICIES:
+                    group = valid[(valid.profile == p["name"]) & (valid.policy == policy)].sort_values("reference_requirement_mw")
+                    ax.errorbar(group.reference_requirement_mw, group[field],
+                        yerr=group[field+"_ci95_halfwidth"], fmt="o-", color=colors[policy],
+                        label=names[policy], ms=3, lw=1.2, capsize=2, elinewidth=.6)
+                ax.set(title=p["label"], xlabel="Reference FCR procurement [MW]", ylabel=label,
+                       xlim=(min(protocol["settings"]["requirements_mw"])-.3, max(protocol["settings"]["requirements_mw"])+.3))
+                if field in ("profit_eur", "net_payment_eur"):
+                    ax.axhline(0, color="black", lw=.6)
+            axes[0].legend(fontsize=7)
+            note = ("Peak only: unfiltered physical RHS over each full 40/60 s episode; exact event limits, no averaging"
+                    if "rocof" in field else "Frozen gamma=50 and lambda2=30000; compare each disturbance separately")
+            fig.suptitle(f"{title} | 16 common independent draws, pointwise 95% intervals\n{note}")
+            save(fig, filename)
+        awards = pd.read_csv(output / "provider_awards.csv")
+        q = market[market.status == "feasible"].reference_requirement_mw.to_numpy()
+        fig, axes = plt.subplots(1, 2, figsize=(13, 4.5), constrained_layout=True)
+        identities = awards.provider_id.drop_duplicates().tolist()
+        palette = ["#4c78a8", "#f2a541", "#8d6cab", "#54a89b", "#bd5a32"]
+        stacks = [awards[awards.provider_id == name].set_index("reference_requirement_mw").loc[q, "quantity_mw"].to_numpy()
+                  for name in identities]
+        axes[0].stackplot(q, *stacks, labels=identities, colors=palette, alpha=.85)
+        axes[0].plot(q, q, color="black", lw=.8, ls="--")
+        axes[0].set(xlabel="Reference FCR procurement [MW]", ylabel="Contracted reserve [MW]",
+                    title="Awards by provider", xlim=(min(protocol["settings"]["requirements_mw"]), max(protocol["settings"]["requirements_mw"])))
+        axes[0].legend(fontsize=7, loc="upper left")
+        feasible = market[market.status == "feasible"]
+        axes[1].plot(feasible.reference_requirement_mw, feasible.fcr_block_payment_eur, "o-", color="#455565")
+        axes[1].set(xlabel="Reference FCR procurement [MW]", ylabel="FCR payment [EUR/block]", title="Actual uniform-price clearing")
+        bad = market[market.status != "feasible"]
+        if len(bad):
+            for ax in axes:
+                ax.axvspan(float(market.maximum_offer_supply_mw.iloc[0]), max(protocol["settings"]["requirements_mw"]),
+                           color="#c35c54", alpha=.12)
+            axes[0].text(.98, .05, "Higher demands infeasible", ha="right", transform=axes[0].transAxes, color="#a03030")
+        fig.suptitle(title+" | unchanged offers within fleet, demand-only sensitivity")
+        save(fig, "capacity_awards_and_budget")
+        for field, label, filename in (
+                ("frequency_error_hz2_s", "FCR equivalent minus FI: E_f [Hz² s]", "equal_budget_error_difference"),
+                ("rocof_max_abs_hz_per_s", "FCR equivalent minus FI: peak |RoCoF| [Hz/s]", "equal_budget_peak_rocof_difference")):
+            fig, axes = panels()
+            for ax, p in zip(axes, profiles, strict=True):
+                for policy in ("bilinear", "l2"):
+                    group = comparisons[(comparisons.bank == "validation") & (comparisons.profile == p["name"])
+                        & (comparisons.comparator == policy)].sort_values("reference_requirement_mw")
+                    ax.errorbar(group.reference_requirement_mw, group[field+"_difference"],
+                        yerr=group[field+"_difference_ci95_halfwidth"], fmt="o-", color=colors[policy],
+                        label=names[policy], ms=3, lw=1.1, capsize=2, elinewidth=.6)
+                ax.axhline(0, color="black", lw=.7)
+                ax.set(title=p["label"], xlabel="Reference FCR procurement [MW]", ylabel=label)
+            axes[0].legend(fontsize=7)
+            fig.suptitle(f"{title} | conditional N=1, frozen design expected budgets\n"
+                         "Paired independent differences, pointwise 95% intervals; positive values favor FI on this metric")
+            save(fig, filename)
+        fig, axes = panels()
+        for ax, p in zip(axes, profiles, strict=True):
+            for policy in ("bilinear", "l2"):
+                group = comparisons[(comparisons.bank == "validation") & (comparisons.profile == p["name"])
+                    & (comparisons.comparator == policy)].sort_values("reference_requirement_mw")
+                ax.errorbar(group.reference_requirement_mw, group.mean_budget_gap_eur,
+                    yerr=group.budget_gap_ci95_halfwidth, fmt="o-", color=colors[policy],
+                    label=names[policy], ms=3, capsize=2, elinewidth=.6)
+            ax.axhline(0, color="black", lw=.7)
+            ax.set(title=p["label"], xlabel="Reference FCR procurement [MW]",
+                   ylabel="FCR equivalent minus FCR+FI spending [EUR/block]")
+        axes[0].legend(fontsize=7)
+        fig.suptitle(title+" | independent spending residuals, conditional N=1\n"
+                     "Exact design mean matching does not imply equal realized spending")
+        save(fig, "equal_budget_spending_residuals")
+        selected_q = sorted(set([float(q[0]), float(q[len(q)//2]), float(q[-1])]))
+        examples = [p for p in profiles if p["name"] in ("short_deficit_pulse", "bipolar_doublet")]
+        if not examples:
+            examples = profiles[:1]
+        fig, axes = plt.subplots(len(selected_q), len(examples), figsize=(7*len(examples), 2.7*len(selected_q)),
+                                 squeeze=False, constrained_layout=True)
+        for row, requirement in enumerate(selected_q):
+            for col, p in enumerate(examples):
+                for policy in BASE_POLICIES:
+                    path = output / "delivery" / f"q{requirement:g}" / p["name"] / policy / "trajectory.csv"
+                    if not path.exists():
+                        # The preserved q=12 scalar outcomes reference the original delivery traces.
+                        path = Path(protocol["source_directory"]) / "delivery" / p["name"] / policy / "trajectory.csv"
+                    frame = pd.read_csv(path)
+                    axes[row, col].plot(frame.time_s, frame.delta_frequency_hz*1000,
+                                       color=colors[policy], label=names[policy], lw=1.2)
+                axes[row, col].set(title=f"{p['label']} | {requirement:g} MW FCR",
+                    xlabel="Time [s]", ylabel="Frequency deviation [mHz]")
+        axes[0, 0].legend(fontsize=7)
+        fig.suptitle(title+" | one common independent delivery draw\n"
+                     "Frequency trajectories only; peak RoCoF is reported separately")
+        save(fig, "capacity_frequency_delivery")
+
+
+def plot_l2_study(output, plan, summary):
+    """Design-only cost/performance curves; no automatic policy selection."""
+    colors = {"l2": "#007a92", "bilinear": "#bc5a32"}
+    labels = {"l2": "L2", "bilinear": "Bilinear FI"}
+    variance_note = ("Gaussian variance " + ", ".join(f"{p['variance_mw2']:g}" for p in
+        plan["provider_overrides"].values()) + " MW² | ") if plan.get("provider_overrides") else ""
+    def save(fig, name):
+        fig.savefig(output / f"{name}.png", dpi=170)
+        plt.close(fig)
+    def curve(ax, profile, field, ylabel, *, annotate=False):
+        for mechanism in ("l2", "bilinear"):
+            data = summary[(summary.profile == profile) & (summary.mechanism == mechanism)].sort_values("coefficient")
+            ax.errorbar(data.net_payment_eur, data[field],
+                xerr=data.net_payment_eur_ci95_halfwidth, yerr=data[field+"_ci95_halfwidth"],
+                color=colors[mechanism], fmt="o-", ms=4, lw=1.3, elinewidth=.6, capsize=2,
+                alpha=.85, label=labels[mechanism])
+            if annotate:
+                for index, row in enumerate(data.itertuples()):
+                    value = row.coefficient
+                    label = (f"{value/1e6:g}M" if value >= 1e6 else
+                             f"{value/1000:g}k" if value >= 1000 else f"{value:g}")
+                    offset = 5 + 7*(index % 2) if mechanism == "l2" else -10 - 8*(index % 2)
+                    ax.annotate(label, (row.net_payment_eur, getattr(row, field)),
+                        xytext=(4, offset), textcoords="offset points",
+                        fontsize=6.5, color=colors[mechanism])
+        ax.set(xlabel="Mean net FI transfer [EUR/event]", ylabel=ylabel)
+        ax.set_xscale("symlog", linthresh=1.)
+        if field == "rocof_max_abs_hz_per_s":
+            values = summary[summary.profile == profile][field]
+            ax.set_ylim(0., max(.01, 1.15 * values.max()))
+    with plt.rc_context({"font.size": 9, "axes.spines.top": False, "axes.spines.right": False,
+                         "axes.grid": True, "grid.alpha": .18}):
+        profiles = plan["profiles"]
+        fig, axes = plt.subplots(len(profiles), 1, figsize=(10, 2*len(profiles)),
+                                 squeeze=False, constrained_layout=True)
+        for ax, profile in zip(axes[:, 0], profiles, strict=True):
+            points = [(0., 0.), (profile["start_time_s"], profile["power_deficit_mw"]),
+                      *profile["changes"], (plan["final_time_s"],
+                        profile["changes"][-1][1] if profile["changes"] else profile["power_deficit_mw"])]
+            x, y = np.array(points).T
+            ax.step(x, y, where="post", color="#394a59", lw=1.8)
+            ax.axhline(0, color="black", lw=.5)
+            ax.set(title=profile["label"], ylabel="Net deficit [MW]", xlim=(0, plan["final_time_s"]))
+            ax.text(.99, .93, "; ".join(f"{t:g} s: {d:+g} MW" for t, d in points[1:-1]),
+                    ha="right", va="top", transform=ax.transAxes, fontsize=8)
+        axes[-1, 0].set_xlabel("Time [s]")
+        fig.suptitle("Synthetic disturbance profiles | positive = deficit, negative = surplus")
+        save(fig, "disturbance_profiles")
+        rows = (len(profiles)+1)//2
+        fig, axes = plt.subplots(rows, 2, figsize=(12, 4*rows), squeeze=False, constrained_layout=True)
+        for ax, p in zip(list(axes.flat)[:len(profiles)], profiles, strict=True):
+            curve(ax, p["name"], "frequency_error_hz2_s", "Integrated squared error [Hz² s]", annotate=True)
+            ax.set_title(p["label"])
+        for ax in list(axes.flat)[len(profiles):]:
+            ax.set_visible(False)
+        axes[0, 0].legend()
+        fig.suptitle(f"Design curves | {variance_note}{plan['design_samples']} paired draws | pointwise 95% intervals\n"
+                     "Labels are lambda2 (L2) or gamma (bilinear); no policy selected")
+        save(fig, "design_pareto")
+        fig, axes = plt.subplots(2, 2, figsize=(11, 7.5), constrained_layout=True)
+        for ax, (field, ylabel) in zip(axes.flat, (
+                ("nadir_sampled_hz", "Mean sampled nadir [Hz]"),
+                ("zenith_sampled_hz", "Mean sampled zenith [Hz]"),
+                ("final_absolute_error_hz", "Mean terminal absolute error [Hz]"),
+                ("rocof_max_abs_hz_per_s", "Mean peak |RoCoF| [Hz/s]")), strict=True):
+            curve(ax, "equal_weight_mixture", field, ylabel)
+        axes[0, 0].legend()
+        fig.suptitle("Equal-weight synthetic profile mixture | design only\n"
+                     f"RoCoF: peak absolute unfiltered RHS over [0,{plan['final_time_s']:g}] s, exact event limits, no averaging")
+        save(fig, "metric_pareto")
+        fig, axes = plt.subplots(1, 2, figsize=(11, 4.6), constrained_layout=True)
+        curve(axes[0], "equal_weight_mixture", "frequency_error_hz2_s", "Mean squared error integral [Hz² s]", annotate=True)
+        for mechanism in ("l2", "bilinear"):
+            data = summary[(summary.profile == "equal_weight_mixture") & (summary.mechanism == mechanism)]
+            axes[1].plot(data.coefficient, data.payment_prediction_absolute_error_eur, "o-",
+                         color=colors[mechanism], label=labels[mechanism])
+        axes[0].legend()
+        axes[1].set(xscale="symlog", xlabel="Contract coefficient (different units)",
+                    ylabel="Mean sum of interval |payment prediction error| [EUR]")
+        fig.suptitle("Equal-weight synthetic mixture | exploratory design, no selected policy")
+        save(fig, "mixture_pareto")
+        fig, axes = plt.subplots(4, len(profiles), figsize=(13, 10), squeeze=False, constrained_layout=True)
+        for column, p in enumerate(profiles):
+            for mechanism, grid in (("l2", plan["lambda2_values"]), ("bilinear", plan["gamma_values"])):
+                coefficient = grid[len(grid)//2]
+                path = output / "design_trajectories" / p["name"] / mechanism / f"{coefficient:g}"
+                trace = pd.read_csv(path / "trajectory.csv")
+                fi_id = pd.read_csv(path / "intervals.csv", nrows=1).provider_id.iloc[0]
+                values = [trace.delta_frequency_hz*1000, trace.rocof_hz_per_s,
+                          trace[f"{fi_id}_response_mw"], trace.net_payment_eur]
+                for row, value in enumerate(values):
+                    axes[row, column].plot(trace.time_s, value, color=colors[mechanism], lw=1.2,
+                        label=f"{labels[mechanism]} {coefficient:g}")
+                limits = pd.read_csv(path / "disturbance_limits.csv")
+                for event in limits.itertuples():
+                    axes[1, column].plot([event.time_s]*2,
+                        [event.rocof_left_hz_per_s, event.rocof_right_hz_per_s], color=colors[mechanism], lw=1.)
+            axes[0, column].set_title(p["label"])
+            axes[0, column].legend(fontsize=7)
+            axes[-1, column].set_xlabel("Time [s]")
+        for row, ylabel in enumerate(("Frequency deviation [mHz]", "RoCoF [Hz/s]", "FI delivery [MW]", "Net transfer [EUR]")):
+            axes[row, 0].set_ylabel(ylabel)
+        fig.suptitle("Design sample 0 | middle-grid diagnostics, not TSO selections\n"
+                     "Matched fleet, awards, costs and availability")
+        save(fig, "design_dynamics")
+
+
+def plot_policy_pareto(output, summary, selection, profiles, horizon):
+    """Separate cost/performance views, with frozen design choices marked."""
+    from .lyapunov_comparison import METRICS
+    colors = {"l2": "#007a92", "bilinear": "#bc5a32"}
+    labels = {p["name"]: p["label"] for p in profiles}
+    labels["design_mixture"] = "Equal-weight design mixture"
+    with plt.rc_context({"font.size": 9, "axes.spines.top": False, "axes.spines.right": False,
+                         "axes.grid": True, "grid.alpha": .18}):
+        for metric, (ylabel, _) in METRICS.items():
+            rows = (len(labels)+2)//3
+            fig, axes = plt.subplots(rows, 3, figsize=(15, 4.1*rows), squeeze=False, constrained_layout=True)
+            for ax, (profile, label) in zip(list(axes.flat)[:len(labels)], labels.items(), strict=True):
+                for mechanism in ("l2", "bilinear"):
+                    data = summary[(summary.profile == profile) & (summary.mechanism == mechanism)].sort_values("coefficient")
+                    ax.errorbar(data.net_payment_eur, data[metric],
+                        xerr=data.net_payment_eur_ci95_halfwidth, yerr=data[metric+"_ci95_halfwidth"],
+                        fmt="o-", ms=3.5, color=colors[mechanism], capsize=2, elinewidth=.5,
+                        lw=1.2, label="L2" if mechanism == "l2" else "Bilinear FI")
+                    coefficient = selection["lambda2"] if mechanism == "l2" else selection["gamma"]
+                    selected = data[data.coefficient == coefficient].iloc[0]
+                    ax.scatter([selected.net_payment_eur], [selected[metric]], marker="*", s=115,
+                        color=colors[mechanism], edgecolor="black", linewidth=.5, zorder=5)
+                    ax.annotate(("lambda2=" if mechanism == "l2" else "gamma=")+f"{coefficient:g}",
+                        (selected.net_payment_eur, selected[metric]), xytext=(5, 12 if mechanism == "l2" else -16),
+                        textcoords="offset points", fontsize=7, color=colors[mechanism])
+                ax.set(xlabel="Mean net FI transfer [EUR/event]", ylabel=ylabel, title=label)
+                ax.set_xscale("symlog", linthresh=1.)
+                if metric == "rocof_max_abs_hz_per_s":
+                    ax.set_ylim(0., 1.15*summary[summary.profile == profile][metric].max())
+            for ax in list(axes.flat)[len(labels):]:
+                ax.set_visible(False)
+            axes[0, 0].legend()
+            note = (f" | unfiltered RHS peak over [0,{horizon:g}] s, exact event limits, no averaging"
+                    if metric == "rocof_max_abs_hz_per_s" else "")
+            fig.suptitle(f"Metric-specific design Pareto diagnostics | four paired draws, pointwise 95% intervals{note}\n"
+                         "Stars: illustrative TSO choices frozen before independent evaluation")
+            fig.savefig(output / f"pareto_{metric}.png", dpi=160)
+            plt.close(fig)
+
+
+def plot_frozen_comparison(output, protocol, summary, matches):
+    settings, plan = protocol["settings"], protocol["source_plan"]
+    profiles = [dict(p, final_time_s=plan["final_time_s"]) for p in plan["profiles"]] + settings["demonstrations"]
+    colors = {"fcr_base": "#455565", "bilinear": "#bc5a32", "l2": "#007a92",
+              "fcr_equal_bilinear_n1": "#9a669b", "fcr_equal_l2_n1": "#669a39"}
+    names = {"fcr_base": "FCR 12 MW", "bilinear": "Bilinear FI", "l2": "L2 FI",
+             "fcr_equal_bilinear_n1": "FCR, bilinear budget", "fcr_equal_l2_n1": "FCR, L2 budget"}
+    def trace(profile, policy):
+        path = output / "delivery" / profile / policy
+        return pd.read_csv(path / "trajectory.csv"), pd.read_csv(path / "disturbance_limits.csv")
+    def rocof(ax, frame, limits, color, style):
+        ax.plot(frame.time_s, frame.rocof_hz_per_s, color=color, ls=style, lw=1.2)
+        for e in limits.itertuples():
+            ax.plot([e.time_s]*2, [e.rocof_left_hz_per_s, e.rocof_right_hz_per_s], color=color, ls=style, lw=1.)
+    def save(fig, name):
+        fig.savefig(output / (name+".png"), dpi=160)
+        plt.close(fig)
+    with plt.rc_context({"font.size": 9, "axes.spines.top": False, "axes.spines.right": False,
+                         "axes.grid": True, "grid.alpha": .18}):
+        cases = settings["demonstrations"]
+        fig, axes = plt.subplots(4, len(cases), figsize=(3.5*len(cases), 10), squeeze=False, constrained_layout=True)
+        for col, case in enumerate(cases):
+            for policy in ("fcr_base", "bilinear", "l2"):
+                frame, limits = trace(case["name"], policy)
+                axes[0, col].plot(frame.time_s, frame.delta_frequency_hz*1000, color=colors[policy], label=names[policy], lw=1.3)
+                rocof(axes[1, col], frame, limits, colors[policy], "-")
+                axes[2, col].plot(frame.time_s, frame.renewable_uncertain_response_mw, color=colors[policy], lw=1.2)
+                axes[3, col].plot(frame.time_s, frame.net_payment_eur, color=colors[policy], lw=1.2)
+            axes[0, col].set_title(case["label"])
+            axes[0, col].legend(fontsize=7)
+            axes[-1, col].set_xlabel("Time [s]")
+        for row, label in enumerate(("Frequency deviation [mHz]", "RoCoF [Hz/s]", "FI delivery [MW]", "Net FI event transfer [EUR]")):
+            axes[row, 0].set_ylabel(label)
+        fig.suptitle("Frozen policies on unseen disturbances | one independent common delivery draw\n"
+                     "Separate from the 16-draw independent assessment; no future events enter decisions")
+        save(fig, "unseen_disturbance_delivery")
+        fig, axes = plt.subplots(len(cases), 1, figsize=(11, 2*len(cases)), squeeze=False, constrained_layout=True)
+        for ax, case in zip(axes[:, 0], cases, strict=True):
+            frame, _ = trace(case["name"], "fcr_base")
+            ax.step(frame.time_s, frame.power_deficit_mw, where="post", color="#455565")
+            ax.set(title=case["label"], ylabel="Net deficit [MW]")
+        axes[-1, 0].set_xlabel("Time [s]")
+        fig.suptitle("Unseen synthetic disturbance profiles | positive = deficit; levels are absolute")
+        save(fig, "unseen_disturbance_profiles")
+        fields = (("frequency_error_hz2_s", "E_f [Hz² s]"), ("nadir_sampled_hz", "Nadir [Hz]"),
+                  ("peak_absolute_error_hz", "Peak absolute error [Hz]"), ("rocof_max_abs_hz_per_s", "Peak |RoCoF| [Hz/s]"))
+        fig, axes = plt.subplots(2, 2, figsize=(14, 8), constrained_layout=True)
+        x = np.arange(len(profiles))
+        for ax, (field, label) in zip(axes.flat, fields, strict=True):
+            for offset, policy in zip((-.2, 0., .2), ("fcr_base", "bilinear", "l2"), strict=True):
+                data = summary[(summary.bank == "validation") & (summary.policy == policy)].set_index("profile").loc[[p["name"] for p in profiles]]
+                ax.errorbar(x+offset, data[field], yerr=data[field+"_ci95_halfwidth"], fmt="o", color=colors[policy],
+                            capsize=3, ms=4, label=names[policy])
+            ax.set(ylabel=label, xticks=x, xticklabels=[p["name"].replace("_", " ") for p in profiles])
+            ax.tick_params(axis="x", labelrotation=35, labelsize=7)
+        axes[0, 0].legend()
+        fig.suptitle("Independent assessment | 16 common draws, pointwise 95% intervals\n"
+                     "Compare policies within each profile (40/60 s); RoCoF uses unfiltered RHS, exact event limits, no averaging")
+        save(fig, "independent_performance")
+        budget_cases = [p for p in cases if p["name"] in ("short_deficit_pulse", "bipolar_doublet")]
+        if budget_cases:
+            fig, axes = plt.subplots(3, len(budget_cases), figsize=(7*len(budget_cases), 9), squeeze=False, constrained_layout=True)
+            for col, case in enumerate(budget_cases):
+                relevant = matches[(matches.profile == case["name"]) & (matches.events_per_block == 1) & (matches.status == "matched")]
+                available = ["fcr_base", "bilinear", "l2"] + relevant.policy.tolist()
+                for policy in available:
+                    frame, limits = trace(case["name"], policy)
+                    style = "--" if policy.startswith("fcr_equal") else "-"
+                    axes[0, col].plot(frame.time_s, frame.delta_frequency_hz*1000, color=colors[policy], ls=style,
+                                      label=names[policy], lw=1.3)
+                    rocof(axes[1, col], frame, limits, colors[policy], style)
+                axes[0, col].set(title=case["label"], ylabel="Frequency deviation [mHz]")
+                axes[0, col].legend(fontsize=7)
+                axes[1, col].set(xlabel="Time [s]", ylabel="RoCoF [Hz/s]")
+                amounts, labels, bar_colors = [], [], []
+                for mechanism in ("bilinear", "l2"):
+                    rows = relevant[relevant.comparator == mechanism]
+                    if not rows.empty:
+                        r = rows.iloc[0]
+                        amounts.extend([r.target_block_payment_eur, r.matched_block_payment_eur])
+                        labels.extend(["FCR + " + ("L2" if mechanism == "l2" else "bilinear"), f"FCR {r.requirement_mw:.3f} MW"])
+                        bar_colors.extend([colors[mechanism], colors[r.policy]])
+                if amounts:
+                    baseline = float(relevant.baseline_block_payment_eur.iloc[0])
+                    extra = np.asarray(amounts)-baseline
+                    axes[2, col].bar(np.arange(len(amounts)), extra, color=bar_colors, alpha=.8)
+                    axes[2, col].set(xticks=np.arange(len(amounts)), xticklabels=labels,
+                        ylabel="Extra spending [EUR/block]", ylim=(0, float(extra.max())+4),
+                        title=f"Above the common {baseline:g} EUR/block FCR baseline")
+                    for i, amount in enumerate(amounts):
+                        axes[2, col].text(i, amount-baseline+.3, f"total {amount:.2f}", ha="center", fontsize=8)
+            fig.suptitle("Conditional N=1 accounting | equal design expected spending\n"
+                         "Procurement frozen before independent delivery; realized FI spending gaps are reported separately")
+            save(fig, "equal_budget_delivery")
+        fig, ax = plt.subplots(figsize=(12, 4.5), constrained_layout=True)
+        for offset, mechanism in ((-.18, "bilinear"), (.18, "l2")):
+            data = matches[matches.comparator == mechanism].drop_duplicates("profile").set_index("profile").loc[[p["name"] for p in profiles]]
+            ax.bar(x+offset, data.maximum_events_from_design_mean, width=.34, color=colors[mechanism], label=names[mechanism])
+        for count in settings["events_per_block"]:
+            ax.axhline(count, color="#777777", ls="--", lw=.7)
+        ax.set(xticks=x, xticklabels=[p["name"].replace("_", " ") for p in profiles],
+               ylabel="Maximum N from design mean transfer", title="Same-fleet FCR budget feasibility | conditional accounting, no event-rate forecast")
+        ax.tick_params(axis="x", labelrotation=30, labelsize=8)
+        ax.legend()
+        save(fig, "budget_feasibility")
+
+
+def plot_l2_uncertainty_comparison(output, summary, reference, laws):
+    """Show the law sensitivity with the same n and confidence convention."""
+    colors = {"l2": "#007a92", "bilinear": "#bc5a32"}
+    with plt.rc_context({"font.size": 9, "axes.spines.top": False, "axes.spines.right": False,
+                         "axes.grid": True, "grid.alpha": .18}):
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True)
+        for mechanism, label in (("l2", "L2"), ("bilinear", "Bilinear FI")):
+            for frame, name, style, alpha in ((reference, "reference", "--", .4), (summary, "reduced uncertainty", "-", .95)):
+                data = frame[(frame.profile == "equal_weight_mixture") & (frame.mechanism == mechanism)].sort_values("coefficient")
+                axes[0].errorbar(data.net_payment_eur, data.frequency_error_hz2_s,
+                    xerr=data.net_payment_eur_ci95_halfwidth, yerr=data.frequency_error_hz2_s_ci95_halfwidth,
+                    fmt="o"+style, color=colors[mechanism], alpha=alpha, ms=3.5, lw=1.3,
+                    elinewidth=.6, capsize=2, label=f"{label}, {name}")
+            a = reference[(reference.profile == "equal_weight_mixture") & (reference.mechanism == mechanism)].set_index("coefficient")
+            b = summary[(summary.profile == "equal_weight_mixture") & (summary.mechanism == mechanism)].set_index("coefficient")
+            valid = a.frequency_error_hz2_s_ci95_halfwidth > 1e-14
+            ratio = b.loc[valid, "frequency_error_hz2_s_ci95_halfwidth"] / a.loc[valid, "frequency_error_hz2_s_ci95_halfwidth"]
+            axes[1].plot(ratio.index, ratio, "o-", color=colors[mechanism], label=label)
+        axes[0].set(xscale="symlog", xlabel="Mean net FI transfer [EUR/event]", ylabel="Mean squared error integral [Hz² s]")
+        axes[1].set(xscale="symlog", xlabel="Contract coefficient (different units)", ylabel="95% CI halfwidth: new / reference")
+        axes[1].axhline(1., color="#777777", lw=.8, ls="--")
+        axes[0].legend(fontsize=7)
+        axes[1].legend()
+        law = laws[0]
+        fig.suptitle(f"Availability sensitivity | underlying variance {law['reference_variance_mw2']:g} -> {law['variance_mw2']:g} MW²\n"
+                     "Same four design draws paired by quantile; same pointwise 95% Student-t intervals")
+        fig.savefig(output / "uncertainty_comparison.png", dpi=170)
+        plt.close(fig)
+
+
 def plot_fpp_controller_comparison(output, source, players, gains):
     from .fpp_comparison import CASES, CONTROLLERS
     labels = ["Previous continuous droop", "Sampled unit gain", "Selected gains"]

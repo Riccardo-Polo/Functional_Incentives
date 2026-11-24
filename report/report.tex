@@ -1,0 +1,68 @@
+\documentclass[a4paper,11pt,twoside]{book}
+
+\usepackage{ifareport}
+
+\usepackage{booktabs}
+\usepackage{rotating}
+\usepackage{array}
+\usepackage{algorithmicx}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+%% Configuration %%%%%%%%%%%%%%%%
+\title{Functional incentives for frequency control}
+\author{Riccardo Polo}
+\thesistype{Semester Project}
+\date{\today}
+\advisors{Prof. Florian D{\"o}rfler, Jonas G. Matt, Claudia Valero de la Flor}
+\keywords{advanced, quantum, psychology}
+
+%% hyperref configuration %%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\loadhyperref
+
+\begin{document}
+
+\hyphenation{}
+
+%% Cover %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\maketitle
+
+%%% Abstract %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\chapter{Abstract} \label{abstract}
+
+%% Preface %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\chapter{Preface}
+
+%% List of contents %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\cleardoublepage
+\tableofcontents
+\cleardoublepage
+\addcontentsline{toc}{chapter}{List of Figures}
+\listoffigures
+\cleardoublepage
+\addcontentsline{toc}{chapter}{List of Tables}
+\listoftables					
+\cleardoublepage
+\mainmatter
+
+%% Chapter x: Title %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\chapter{Chapter}
+
+\section{Section} \label{sec:Section1}
+
+
+\section{Section2} \label{sec:Section2}
+
+%% Bibliography %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\addcontentsline{toc}{chapter}{Bibliography}
+\cleardoublepage
+\printbibliography
+
+%% Appendix %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\begin{appendix}
+\chapter{Chapter}\label{app:Chapter}
+
+\section{Section}\label{appsec:Section}
+\end{appendix}
+        									
+\end{document}

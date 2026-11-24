@@ -221,6 +221,14 @@ class OfferDecisionTests(unittest.TestCase):
                                 minimum_bid_mw=.001, **args)
         self.assertEqual(clipped.offer.quantity_mw, 0)
 
+    def test_reduced_variance_can_preserve_voluntary_zero_offer_with_same_economics(self):
+        args = dict(cost=QuadraticCommitmentCost(5, 1),
+                    penalty_eur_per_missing_mw_block=200,
+                    maximum_bid_price_eur_per_mw_block=20, minimum_bid_mw=1)
+        self.assertEqual(self.decision(GaussianReserve(2, 4, 4, "truncated"), **args).offer.quantity_mw, 0)
+        self.assertEqual(self.decision(GaussianReserve(2, 1.75, 4, "truncated"), **args).offer.quantity_mw, 0)
+        self.assertEqual(self.decision(GaussianReserve(2, 1.25, 4, "truncated"), **args).offer.quantity_mw, 1)
+
     def test_invalid_intervals_and_solver_failure_are_reported(self):
         law = GaussianReserve(2, 1, 5, "truncated")
         for override in ({"minimum_bid_price_eur_per_mw_block": 11},
@@ -241,6 +249,87 @@ class OfferDecisionTests(unittest.TestCase):
         self.assertEqual(symmetric_reserve_capacity_mw(210, 205, 220), 5)
         with self.assertRaises(ValueError):
             symmetric_reserve_capacity_mw(210, 0, 200)
+
+
+class L2DecisionTests(unittest.TestCase):
+    def test_window_plan_matches_single_action_and_independent_cost(self):
+        from functional_incentives.decision import choose_l2_window_targets, choose_l2_target
+        from functional_incentives.providers import FIProviderParameters
+        from scipy.integrate import quad
+        from scipy.optimize import minimize
+        p=FIProviderParameters("l2",.25,3.,0.,1.)
+        kwargs=dict(sampled_frequency_error_hz=-.02,sampled_rocof_hz_per_s=-.03,
+                    frequency_mass_mw_s_per_hz=150.,initial_response_mw=1.,weight_eur_per_hz2=30000.)
+        plan,endpoint,cost=choose_l2_window_targets(p,durations_s=[.1],**kwargs)
+        original=choose_l2_target(p,duration_s=.1,**kwargs)
+        self.assertAlmostEqual(plan[0],original.target_mw,places=7)
+        durations=[.1,.1,.05]
+        plan,endpoint,cost=choose_l2_window_targets(p,durations_s=durations,**kwargs)
+        def objective(v):
+            z=1.;energy=0.;cost=0.
+            for h,target in zip(durations,v):
+                response=lambda s:z*np.exp(-s/.25)+target*(1-np.exp(-s/.25))
+                energy+=quad(response,0,h)[0]
+                cost+=quad(lambda s:response(s)**2/2,0,h)[0]
+                z=response(h)
+            e=-.02+sum(durations)*(-.03-1/150)+energy/150
+            return 30000*e**2+cost
+        answer=minimize(objective,np.zeros(3),bounds=[(-3.,3.)]*3,tol=1e-12)
+        self.assertLessEqual(objective(plan),answer.fun+1e-8)
+        self.assertAlmostEqual(objective(plan),30000*endpoint**2+cost,places=10)
+
+    def test_l2_target_matches_independent_quadrature_and_optimization(self):
+        from scipy.integrate import quad
+        from scipy.optimize import minimize_scalar
+        from functional_incentives.decision import choose_l2_target
+        from functional_incentives.providers import FIProviderParameters
+        provider = FIProviderParameters("l2", .25, 3., 50., 1/72)
+        for h, z0, error, rocof, weight in ((.1, 0., -.03, -.02, 1000.),
+                (.037, 1.2, .01, .04, 10000.), (.1, -1.5, .2, .1, 1e7),
+                (.1, 1., 0., 0., 0.)):
+            with self.subTest(h=h, weight=weight):
+                decision = choose_l2_target(provider, weight_eur_per_hz2=weight,
+                    sampled_frequency_error_hz=error, sampled_rocof_hz_per_s=rocof,
+                    frequency_mass_mw_s_per_hz=150., initial_response_mw=z0, duration_s=h)
+                def objective(v):
+                    z = lambda t: z0*np.exp(-t/.25) + v*(1-np.exp(-t/.25))
+                    endpoint = error + h*rocof + quad(lambda t: z(t)-z0, 0, h)[0]/150
+                    cost = quad(lambda t: provider.rho_eur_per_mw2_s*z(t)**2/2, 0, h)[0]
+                    return weight*endpoint**2 + cost
+                answer = minimize_scalar(objective, bounds=(-3, 3), method="bounded")
+                best = min([answer.x, -3., 3.], key=objective)
+                self.assertAlmostEqual(decision.target_mw, best, delta=2e-5)
+                self.assertLessEqual(objective(decision.target_mw), objective(0.) + 1e-10)
+                passive_endpoint = error + h*rocof + quad(
+                    lambda t: z0*np.exp(-t/.25)-z0, 0, h)[0]/150
+                passive_cost = quad(lambda t: provider.rho_eur_per_mw2_s
+                                    *(z0*np.exp(-t/.25))**2/2, 0, h)[0]
+                expected_profit = weight*passive_endpoint**2 + passive_cost - objective(decision.target_mw)
+                self.assertAlmostEqual(decision.predicted_profit_eur, expected_profit, delta=1e-8)
+                self.assertGreaterEqual(decision.predicted_profit_eur, -1e-10)
+                legacy = choose_l2_target(provider, weight_eur_per_hz2=weight,
+                    sampled_frequency_error_hz=error, sampled_rocof_hz_per_s=rocof,
+                    frequency_mass_mw_s_per_hz=150., initial_response_mw=z0, duration_s=h,
+                    l2_contract="endpoint_only_v1")
+                self.assertEqual(decision.target_mw, legacy.target_mw)
+                self.assertAlmostEqual(decision.predicted_settlement_eur-legacy.predicted_settlement_eur,
+                                       passive_cost, places=12)
+
+    def test_l2_invalid_inputs_and_zero_availability(self):
+        from functional_incentives.decision import choose_l2_target
+        from functional_incentives.providers import FIProviderParameters
+        provider = FIProviderParameters("l2", .25, 0., 0., 1.)
+        args = dict(weight_eur_per_hz2=100., sampled_frequency_error_hz=-.1,
+                    sampled_rocof_hz_per_s=-.02, frequency_mass_mw_s_per_hz=150.,
+                    initial_response_mw=0., duration_s=.1)
+        result = choose_l2_target(provider, **args)
+        self.assertEqual(result.target_mw, 0.)
+        self.assertEqual(result.predicted_settlement_eur, 0.)
+        for override in ({"weight_eur_per_hz2": -1}, {"sampled_rocof_hz_per_s": np.nan},
+                         {"duration_s": 0}, {"frequency_mass_mw_s_per_hz": 0},
+                         {"initial_response_mw": 1}, {"l2_contract": "unknown"}):
+            with self.subTest(override=override), self.assertRaises(ValueError):
+                choose_l2_target(provider, **{**args, **override})
 
 
 if __name__ == "__main__":

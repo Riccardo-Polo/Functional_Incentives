@@ -1,5 +1,13 @@
 # Parameter evidence and calibration register
 
+**FCR capacity sensitivity, 16 November 2026:** the user authorized a separate
+synthetic scenario with conventional reserve capacity 8 MW (previously 4) and
+underlying Gaussian mean 7.98 MW (previously 3.98). Variance, costs, dynamics,
+operating point and renewable laws stay unchanged. This is not external
+calibration. Each support is checked against both solved active-power margins.
+Within each original/expanded fleet only FCR demand changes; no gain retuning.
+See [FCR_CAPACITY_STUDY.md](FCR_CAPACITY_STUDY.md).
+
 Updated 2026-10-16. The original numerical preset remains pedagogical.
 The separate [fleet study](FLEET_STUDY.md) now adopts source-inspired ratings,
 inertia ranges and explicitly reduced response times. Its register records
@@ -8,6 +16,19 @@ This is not plant identification or market calibration; baseline values below
 continue to refer to the original preset.
 
 ## Evidence rules
+
+**L2 availability sensitivity, 15 November 2026:** explicit user request for
+less uncertainty while retaining zero FCR participation. The separate manifest
+`configs/lyapunov_lower_uncertainty.toml` uses variance 1.75 MW^2 instead of
+4 for `renewable_uncertain`, with underlying mean 2 MW and truncated support
+[0,4] MW unchanged. This is a scenario assumption, not a fitted forecast law.
+Actual bounded standard deviations are 1.079120 / 0.987767 MW. Selection used
+the unchanged offer heuristic: the best positive offer has reward -1.310074
+EUR/block at 1.75; the zero-reward boundary at the 1 MW minimum is about
+1.485591 MW^2. Keep the existing costs, 200 EUR/MW shortage penalty, price
+ceiling 20 EUR/MW/block and minimum bid 1 MW. No visual confidence setting is
+changed: the same n=4 and pointwise 95% Student-t formula remain. The reference
+study and original preset stay unchanged. See docs/LYAPUNOV_STUDY.md.
 
 **Current FPP economic benchmark, 6 November 2026 (D-040):** the user requested
 interpretable monetary scales. Both players declare hourly quadratic activation
@@ -98,3 +119,11 @@ resolved configuration remains the source of exact per-provider inputs.
   study. Keep the original scenario reproducible through the same runner.
 - Record unresolved data gaps as such. Do not adjust costs, availability or
   gamma solely to recover the earlier voluntary opt-out or 2:1 observation.
+
+## November meeting disturbance rise time
+
+The 0.5 s rise time in `configs/fi_budget.toml` is an illustrative response
+to the 18 November request for gradual disturbance onsets and reversals.
+It describes the applied net power imbalance. Device-specific sensor bandwidth
+and a measured disturbance trace would require separate data. Jonas Matt's
+17 July 2026 notes, Section 3.1.2, Eq. (22), supply the scalar input reference.

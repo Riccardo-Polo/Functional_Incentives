@@ -1,5 +1,166 @@
 # Work plan after the Week 5 meeting
 
+**24 November, supervisor feedback after Week 11:** prioritize a denser L2
+coefficient sweep at the 288 EUR reference budget. Plot mean integrated squared
+frequency error against lambda2. The user authorizes a fixed FCR price and
+variable FCR awards to avoid endogenous clearing-price gaps. The study in
+`results/l2_fixed_budget/` uses 24 EUR/MW/block and proportional scaling of the
+12 MW reference awards, with one FI event per block and the same equal-weight
+four-profile design mixture. Match design spending, then freeze procurement
+for diagnostic validation and report its actual spending gaps. Keep 0.1 s
+single-target control, endpoint-only settlement and the current zero-target
+replay. See [the budget protocol](FI_BUDGET.md).
+
+Deferred follow-ups: compare an ideal reference with immediately zero delivered
+input, and extend Pareto studies to longer settlement periods with explicit
+payment/activation-cost ratios. Neither change is part of the current budget
+experiment. Slower disturbance ramps are acceptable but are not a priority;
+retain the existing illustrative 0.5 s ramps for this comparison.
+
+**21 November (D-049):** the separate-clock L2 experiment is complete. See
+`results/l2_separate_clocks/ANALYSIS.md` and
+[the causal formulation](L2_SEPARATE_CLOCKS.md). Fast 0.1 s control with
+0.25/0.5 s settlement retains improved event profits without reimbursement
+while reducing slow-control transients on the tested cases. Cost, boundary
+effects, residual losses and fresh-policy assessment remain explicit. No
+new maintained default or equal-budget comparison is adopted.
+
+**19 November supervisor feedback:** the completed diagnostic interval sweep
+is in `results/l2_interval_sensitivity/ANALYSIS.md`. Joint decision/settlement
+periods 0.1/0.25/0.5 s improve original-contract event profit but increase some
+transient losses and TSO payments at fixed lambda2. No new clock or contract
+is adopted. Distinguish actual-power measurement from the zero-target versus
+zero-delivered-power counterfactual. Separate settlement/control clocks,
+coefficient scaling and equal-budget comparisons remain distinct next choices.
+
+**19 November accepted adaptation:** implement passive-cost compensation for
+L2, restoring zero profit for a zero target from any inherited response state.
+Keep the same myopic control, physical dynamics, costs and participation rules.
+New economic curves and budget matching require fresh compensated studies;
+preserve existing runs. See [the contract definition](LYAPUNOV_STUDY.md).
+
+**18 November meeting follow-up.** Use gradual net-deficit changes in new
+comparison scenarios and inspect each provider's delivered power in MW.
+For L2 show the free and bounded commands alongside the scalar reference
+from Jonas Matt's Eq. (22). The fixed-budget comparison starts at 12 MW of
+FCR and reduces procurement separately under each FI contract. Match expected
+block-plus-event spending on design draws before evaluating delivery.
+See [the study protocol](FI_BUDGET.md).
+
+**16 November reference decision:** retain the traditional 4 MW reserve-cap
+fleet for the study, with baseline demand 12 MW and the accepted FI availability
+variance 1.75 MW^2. The expanded conventional-reserve scenario stays separate.
+Week 10 LaTeX slides are under `results/week10/slides/`, using the Week 5 ETH
+theme. Main results use the traditional fleet; the expanded study appears in
+the appendix. Coefficients and the physical/economic model remain unchanged.
+
+**16 November follow-up:** test initial FCR demands 12/12.5/13/13.5/14/16/18/20
+MW with frozen gamma=50/lambda2=30000. The user authorized a separate scenario
+increasing conventional reserve capacity/underlying mean from 4/3.98 to 8/7.98
+MW, while preserving original inputs and recording original supply limits.
+Use `--fcr-capacity-study`; see [FCR_CAPACITY_STUDY.md](FCR_CAPACITY_STUDY.md).
+Report only trajectory-peak absolute RoCoF, without time-series RoCoF figures.
+
+**15 November follow-up:** the user requested more metric-specific Pareto
+curves, delegated the explicit TSO coefficient choice and requested significant
+disturbance/equal-spending comparisons. The frozen illustrative choices are
+lambda2=30000 and gamma=50 from the reduced-uncertainty design curves. Use
+`--lyapunov-compare` with `configs/lyapunov_comparison.toml`; new outputs stay
+in `results/lyapunov_comparison/`, referencing earlier studies unchanged.
+Independent assessment uses 16 saved draws; additional pulses/doublets/steps
+use frozen policies. The four-hour FCR block is the existing accounting
+convention. N=1/4/12 event counts remain explicit conditional sensitivities,
+not an adopted forecast; report supply limits and independent spending gaps.
+See [LYAPUNOV_COMPARISON.md](LYAPUNOV_COMPARISON.md).
+
+## Week 10 experiment following the Week 9 meeting (12 November 2026)
+
+**13 November clarification:** the TSO chooses L2 lambda2 explicitly by inspecting
+the design Pareto curves, analogously to the curve-based bilinear FI experiment.
+Do not use the separate weighted optimizer to select it. Build and verify the
+single-provider L2 case and the synthetic disturbance design curves first;
+freeze an explicit curve-based choice before independent evaluation. See
+[LYAPUNOV_STUDY.md](LYAPUNOV_STUDY.md) and `configs/lyapunov.toml`.
+
+**15 November sensitivity:** the user requested less availability uncertainty
+while retaining the uncertain provider's voluntary zero FCR offer. The separate
+`configs/lyapunov_lower_uncertainty.toml` uses underlying variance 1.75 MW^2
+instead of 4, with mean, costs and minimum bid unchanged. Recompute clearing,
+pair the saved banks by common bounded-law quantiles and compare actual 95%
+confidence halfwidths at the same n=4. Keep the original study by reference;
+new outputs go to `results/lyapunov_l2_lower_uncertainty/`. No TSO coefficient
+or independent policy evaluation is selected by this sensitivity.
+
+The Week 9 proposal was received positively. The next experiment follows the
+closing slide in `results/week9/slides/sections/main_content.tex` and adds a
+matched-performance FCR-only comparison.
+
+1. Implement the proposed L2 contract for one FI provider. Choose the bounded
+   held target with the causal local frequency predictor. Settle each interval
+   by replaying a zero target from the full actual initial state with the
+   realized disturbance and responsive FCR. Compare predicted and realized
+   payments, verify target limits and check convergence under solver refinement.
+2. Sweep the L2 coefficient and compare with bilinear FI on paired availability
+   draws for the usual disturbances, including sustained deficit and reversal.
+   Freeze the policies before independent evaluation. Report signed net and
+   gross transfers, activation cost, profit, saturation and decision/replay time.
+   Measure nadir, terminal deviation, integrated squared frequency deviation and
+   peak absolute RoCoF from the unfiltered model RHS over the event horizon,
+   including disturbance right limits, with no averaging window.
+3. Take the measured FCR+FI performance as the target. With the same fleet,
+   disturbances and availability laws, disable FI and vary the FCR requirement.
+   Recompute offers and clear each feasible case. Record who bids, who receives
+   an award, procured MW, clearing price and whole-block payment. Define metric
+   tolerances before selecting on the design bank. Report paired performance
+   gaps and uncertainty on independent evaluation, including cases where no
+   tested feasible procurement matches the target.
+4. As a separate sensitivity, test a modest reduction in provider availability
+   variance if participation limits the FCR-only comparison. Report the changed
+   inputs, actual bids and awards. Pair draws across laws using common underlying
+   quantiles and also evaluate FCR+FI under the changed law to isolate its effect.
+5. Compare the incremental FCR-only block payment with the FI event transfer.
+   For any common-horizon total, state the assumed number and mix of events per
+   block. Keep provider activation costs separate from TSO payments. Record
+   presentation, slide and report deadlines once confirmed.
+
+## Earlier direction of 6 November: Lyapunov incentives
+
+**6 November 2026 (D-041).** The user selected exploration of Lyapunov-based
+functional incentives as the single next research direction. Further AEMO/FPP
+best-response and Nash-equilibrium development is not a parallel workstream.
+The dated plans below are historical where they conflict with this choice;
+existing FPP implementations, configurations and studies remain preserved.
+
+Start from Jonas Matt's *Functional Incentives for Control: Derivations for
+Benchmark and Lyapunov-type Incentives*, dated 17 July 2026, supplied by the
+user as `lyapunov_incentives (1).pdf`. The supplied local source is
+`C:/Users/ricca/Downloads/lyapunov_incentives (1).pdf`; it is not a portable
+repository dependency. These working notes define drift-referenced payments,
+myopic follower best responses and scalar results for L1/L2 variants, with
+and without effort weighting. They are a theoretical starting point, not an
+already implemented or validated frequency-control contract.
+
+The initial exploration should:
+
+1. Understand and check the payment definitions, information assumptions,
+   best responses and scope of the stability and economic results.
+2. Identify the mapping to the existing frequency model: full state, held
+   target versus delivered response, decision interval, passive counterfactual,
+   activation cost, availability bounds and payment units. Keep unresolved
+   choices explicit; scalar unconstrained results do not automatically extend
+   to the coupled system with first-order provider dynamics.
+3. Define a focused research question about whether the theoretical benefits
+   survive actuator dynamics and saturation, using the existing bilinear FI
+   mechanism as a benchmark. Selection of a particular Lyapunov variant and
+   its implementation remain subsequent modelling decisions.
+
+This decision changes research priority only. It does not change the physical
+model, FCR/FI/FPP rules, economic inputs or accepted TSO objective, and does
+not launch simulations. Future frequency assessments must include RoCoF with
+an explicit calculation method, measurement window and summary statistic.
+
+## Historical progress and plans
+
 **6 November 2026 (D-040).** The maintained follower economics now use an
 explicit hourly quadratic cost of 50 EUR/(MW² h), converted once to per-second
 rho=1/72, and symmetric FPP prices of 12 EUR/(MW h). The latter is an
@@ -134,8 +295,9 @@ The local Week 5 deck is
 `results/week5_slides/week5_eth/week5_eth.pdf`, dated 13 October 2026.
 Slide labels 18/22, 21/22 and 22/22 are PDF pages 19, 22 and 23 respectively
 (the title page and appendices explain the different numbering).
-Its adjacent `data/` directory contains the resolved configurations and CSVs.
-These local artifacts are ignored by Git.
+The resolved configurations, CSVs and original figure-generation script are
+preserved in `results/archive/week5_reproduction.zip` (with the original
+`data/` paths inside the archive). These local artifacts are ignored by Git.
 
 The saved FI outcomes give the following **single-realization** observations
 for `renewable_uncertain`, seed 20261008, horizon 0–40 s, rho = 1,
@@ -309,7 +471,10 @@ separate participation-policy change.
 uses no future information, and carried/reset states and money reconcile.
 Do not add an intracycle stochastic availability process implicitly.
 
-## 3. Current next increment: FPP provider optimization
+## 3. Historical next increment: FPP provider optimization
+
+Superseded as the active research direction by D-041 above. This section
+preserves the earlier design brief, not the current implementation status.
 
 The fixed FPP benchmark and metering revision are complete. The next increment
 is to specify an FPP provider problem, then implement and test its solution.

@@ -944,6 +944,22 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIRECTORY)
     parser.add_argument("--seed", type=int, help="override the availability seed")
     tso_mode = parser.add_mutually_exclusive_group()
+    tso_mode.add_argument("--fi-budget-study", action="store_true",
+                         help="replace part of a reference FCR budget with bilinear or L2 event payments")
+    tso_mode.add_argument("--fi-budget-report", type=Path, metavar="STUDY_DIR",
+                         help="regenerate the provider input, profit and budget analysis")
+    tso_mode.add_argument("--fcr-capacity-study", action="store_true",
+                         help="frozen-policy FCR demand sensitivity and equal expected spending")
+    tso_mode.add_argument("--fcr-capacity-report", type=Path, metavar="STUDY_DIR",
+                         help="regenerate capacity sensitivity figures, showing peak RoCoF only")
+    tso_mode.add_argument("--lyapunov-compare", action="store_true",
+                         help="freeze curve-based policies, evaluate independent events and conditional equal budgets")
+    tso_mode.add_argument("--lyapunov-comparison-report", type=Path, metavar="STUDY_DIR",
+                         help="regenerate frozen-policy and equal-budget figures without simulation")
+    tso_mode.add_argument("--lyapunov-study", action="store_true",
+                         help="single-provider L2/bilinear design curves, then explicit TSO selection")
+    tso_mode.add_argument("--lyapunov-report", type=Path, metavar="STUDY_DIR",
+                         help="regenerate saved L2 curves and reports without simulation")
     tso_mode.add_argument("--controlled-study", action="store_true",
                          help="controlled FCR/FI/FPP reversal study with an explicitly chosen Pareto gamma")
     tso_mode.add_argument("--fpp-benchmark", action="store_true",
@@ -971,6 +987,61 @@ def main() -> None:
     selection.add_argument("--compare", action="store_true", help="run base and all configured comparisons")
     selection.add_argument("--scenario", help="run one named comparison, or base")
     arguments = parser.parse_args()
+    if arguments.fi_budget_study or arguments.fi_budget_report:
+        if arguments.compare or arguments.scenario or arguments.seed is not None or arguments.frequency_weight is not None:
+            parser.error("FI budget modes use the saved protocol without overrides")
+        from .fi_budget_report import run_budget_report, run_curve_checks
+        if arguments.fi_budget_report:
+            if arguments.config != DEFAULT_CONFIG_PATH or arguments.output_dir != DEFAULT_OUTPUT_DIRECTORY:
+                parser.error("--fi-budget-report uses the saved study directory")
+            run_budget_report(arguments.fi_budget_report)
+            return
+        if arguments.config == DEFAULT_CONFIG_PATH or arguments.output_dir == DEFAULT_OUTPUT_DIRECTORY:
+            parser.error("--fi-budget-study requires explicit --config and --output-dir")
+        from .fi_budget import run_budget_study
+        run_budget_study(arguments.config, arguments.output_dir)
+        run_curve_checks(arguments.output_dir)
+        run_budget_report(arguments.output_dir)
+        return
+    if arguments.fcr_capacity_study or arguments.fcr_capacity_report:
+        if arguments.compare or arguments.scenario or arguments.seed is not None or arguments.frequency_weight is not None:
+            parser.error("capacity modes use their manifest without scenario/seed/weight/compare overrides")
+        from .fcr_capacity import run_capacity_study, run_capacity_report
+        if arguments.fcr_capacity_report:
+            if arguments.config != DEFAULT_CONFIG_PATH or arguments.output_dir != DEFAULT_OUTPUT_DIRECTORY:
+                parser.error("--fcr-capacity-report writes to STUDY_DIR; do not supply config/output-dir")
+            run_capacity_report(arguments.fcr_capacity_report)
+        else:
+            if arguments.config == DEFAULT_CONFIG_PATH or arguments.output_dir == DEFAULT_OUTPUT_DIRECTORY:
+                parser.error("--fcr-capacity-study requires explicit manifest config and output-dir")
+            run_capacity_study(arguments.config, arguments.output_dir)
+        return
+    if arguments.lyapunov_compare or arguments.lyapunov_comparison_report:
+        if arguments.compare or arguments.scenario or arguments.seed is not None or arguments.frequency_weight is not None:
+            parser.error("L2 comparison uses its manifest; do not supply scenario/seed/weight/compare overrides")
+        from .lyapunov_comparison import run_comparison, run_comparison_report
+        if arguments.lyapunov_comparison_report:
+            if arguments.config != DEFAULT_CONFIG_PATH or arguments.output_dir != DEFAULT_OUTPUT_DIRECTORY:
+                parser.error("--lyapunov-comparison-report writes to STUDY_DIR; do not supply config/output-dir")
+            run_comparison_report(arguments.lyapunov_comparison_report)
+        else:
+            if arguments.config == DEFAULT_CONFIG_PATH or arguments.output_dir == DEFAULT_OUTPUT_DIRECTORY:
+                parser.error("--lyapunov-compare requires explicit manifest --config and --output-dir")
+            run_comparison(arguments.config, arguments.output_dir)
+        return
+    if arguments.lyapunov_study or arguments.lyapunov_report:
+        if arguments.compare or arguments.scenario or arguments.seed is not None or arguments.frequency_weight is not None:
+            parser.error("L2 modes use a frozen manifest; do not supply scenario, seed, weight or compare overrides")
+        from .lyapunov import run_l2_study, run_l2_report
+        if arguments.lyapunov_report:
+            if arguments.config != DEFAULT_CONFIG_PATH or arguments.output_dir != DEFAULT_OUTPUT_DIRECTORY:
+                parser.error("--lyapunov-report writes to STUDY_DIR; do not supply config/output-dir")
+            run_l2_report(arguments.lyapunov_report)
+        else:
+            if arguments.config == DEFAULT_CONFIG_PATH or arguments.output_dir == DEFAULT_OUTPUT_DIRECTORY:
+                parser.error("--lyapunov-study requires explicit manifest --config and --output-dir")
+            run_l2_study(arguments.config, arguments.output_dir)
+        return
     if arguments.controlled_study:
         if (arguments.compare or arguments.scenario or arguments.seed is not None or
                 arguments.frequency_weight is not None or arguments.config == DEFAULT_CONFIG_PATH

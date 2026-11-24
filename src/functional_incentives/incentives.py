@@ -12,6 +12,58 @@ from numpy.typing import NDArray
 
 from .providers import FIProviderParameters, first_order_response_integrals
 
+L2_CONTRACT = "passive_cost_compensated_v1"
+L2_LEGACY_CONTRACT = "endpoint_only_v1"
+
+
+def validate_l2_contract(contract: str) -> None:
+    if contract not in (L2_CONTRACT, L2_LEGACY_CONTRACT):
+        raise ValueError("unknown L2 settlement contract")
+
+
+def l2_passive_cost(provider: FIProviderParameters, initial_response_mw: float,
+                    duration_s: float) -> float:
+    """Exact cost of zero-target decay from the inherited response, in EUR."""
+    if not np.isfinite(initial_response_mw):
+        raise ValueError("initial response must be finite")
+    _, _, aa, _, _ = first_order_response_integrals(provider.time_constant_s, duration_s)
+    return float(.5 * provider.rho_eur_per_mw2_s * aa * initial_response_mw**2)
+
+
+def l2_endpoint_payment(weight_eur_per_hz2: float, passive_error_hz: float,
+                        actual_error_hz: float) -> float:
+    """Performance component in EUR, excluding any passive-cost reimbursement."""
+    if (not np.all(np.isfinite([weight_eur_per_hz2, passive_error_hz, actual_error_hz]))
+            or weight_eur_per_hz2 < 0):
+        raise ValueError("L2 weight must be finite and nonnegative; endpoints must be finite")
+    return float(weight_eur_per_hz2 * (passive_error_hz - actual_error_hz)
+                 * (passive_error_hz + actual_error_hz))
+
+
+@dataclass(frozen=True)
+class L2AccountingTrajectory:
+    """Endpoint transfers held in cumulative ledgers after each interval closes.
+
+    There is no continuous L2 payment rate. Costs integrate delivered response;
+    predicted transfers are also posted at interval ends. Gross amounts split
+    the sign of each interval transfer, not a hypothetical instantaneous rate.
+    """
+
+    provider_ids: tuple[str, ...]
+    gross_rewards_eur: NDArray[np.float64]
+    gross_penalties_eur: NDArray[np.float64]
+    activation_cost_eur: NDArray[np.float64]
+    predicted_settlement_eur: NDArray[np.float64]
+    intervals: tuple[dict, ...]
+
+    @property
+    def net_settlement_eur(self):
+        return self.gross_rewards_eur - self.gross_penalties_eur
+
+    @property
+    def profit_eur(self):
+        return self.net_settlement_eur - self.activation_cost_eur
+
 
 def fi_financial_rates(
     provider: FIProviderParameters, sampled_frequency_error_hz: float, response_mw: float,

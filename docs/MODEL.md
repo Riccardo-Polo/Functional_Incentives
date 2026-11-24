@@ -1,5 +1,20 @@
 # Current frequency-control model
 
+On 19 November 2026 the user adopted L2 passive-cost compensation. Each interval
+adds rho*z_k^2*T*(1-exp(-2h/T))/4 EUR to both predicted and actual endpoint
+payment. Zero target therefore has zero profit even with inherited response.
+The myopic target and actual resource cost are unchanged. Performance charges
+remain separate from reimbursement; total transfers may still be negative.
+See the versioned contract and historical replay rules in
+[LYAPUNOV_STUDY.md](LYAPUNOV_STUDY.md).
+
+The opt-in single-provider Lyapunov L2 experiment (13 November 2026) implements
+the Week 9 bounded held-target proposal, causal local frequency predictor and
+full-state zero-target settlement replay. It shares the physical solver and
+retains the bilinear contract. The TSO selects lambda2 explicitly from design
+Pareto curves. See [LYAPUNOV_STUDY.md](LYAPUNOV_STUDY.md) for equations, units,
+information timing and the limited scope of the scalar theoretical results.
+
 Updated 2026-11-06. The [FPP study](AEMO_FPP.md) selects an ex-ante gain
 for each of two zero-award renewable followers by comparing private mean
 priced raise-plus-lower settlement minus internal activation cost over identical design scenarios. Each provider

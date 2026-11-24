@@ -22,6 +22,19 @@ dist/
 
 # Temporary files
 *.tmp
+/tmp/
+
+# LaTeX build intermediates (keep editable sources, assets and final PDFs)
+*.aux
+*.log
+*.nav
+*.out
+*.snm
+*.toc
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.synctex.gz.sum.synctex
 
 # Local research sources
 references/*.pdf

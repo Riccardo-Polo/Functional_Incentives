@@ -513,6 +513,27 @@ class FCRBlockTests(unittest.TestCase):
 
 
 class ExperimentTests(unittest.TestCase):
+    def test_mixed_budget_reprices_fi_at_each_demand_and_respects_price_jumps(self):
+        from functional_incentives import fi_budget
+        from functional_incentives.market import clear_fcr_market
+        offers = [FCRCapacityOffer("a", 10., 5.), FCRCapacityOffer("b", 20., 5.)]
+        def market(q):
+            return SimpleNamespace(market=clear_fcr_market(offers, q))
+        base = market(8.)
+        for payment_offset, expected in ((10., 150/22), (75., None)):
+            def episode(cleared, *args):
+                q = cleared.market.requirement_mw
+                return dict(fcr_block_payment_eur=cleared.market.total_payment_eur,
+                            net_payment_eur=payment_offset + 2*q)
+            with self.subTest(offset=payment_offset), tempfile.TemporaryDirectory() as folder, (
+                patch.object(fi_budget, "clear_requirement", side_effect=lambda base, plant, config, q: market(q))
+            ), patch.object(fi_budget, "_job", side_effect=episode), redirect_stdout(io.StringIO()):
+                result = fi_budget._match((base, None, {}, {}, {"name": "fixture"}, "l2",
+                    {}, [(0, {}), (1, {})], .01, Path(folder)))
+            if expected is None:
+                self.assertEqual(result["status"], "no_verified_match")
+            else:
+                self.assertAlmostEqual(result["requirement_mw"], expected, places=6)
     def setUp(self):
         self.config = tomllib.loads(experiment.DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
         self.point = SimpleNamespace(
@@ -530,6 +551,254 @@ class ExperimentTests(unittest.TestCase):
             requirement_mw=config["market"]["requirement_mw"],
             minimum_bid_mw=config["market"].get("minimum_bid_mw", 1),
             nominal_frequency_hz=60, rng=np.random.default_rng(config["scenario"]["seed"]))
+
+    def test_l2_study_freezes_selection_before_holdout_and_report_has_no_simulation(self):
+        from functional_incentives import lyapunov
+        from functional_incentives.grid import AndesOperatingPoint
+        point = AndesOperatingPoint(Path("fixture.xlsx"), 100., 60., 1000.,
+            sum(self.point.generator_active_power_mw), .906095586,
+            self.point.generator_ids, (0, 2, 4, 1, 3), self.point.generator_active_power_mw,
+            (300., 400., 400.), (5., 4., 4.), self.point.generator_ratings_mva)
+        head = (experiment.PROJECT_ROOT / "configs/lyapunov.toml").read_text().split("[[profiles]]")[0]
+        head = head.replace('base_config = "fcr.toml"',
+                            f'base_config = "{experiment.DEFAULT_CONFIG_PATH.as_posix()}"')
+        head = head.replace("design_samples = 4", "design_samples = 2").replace(
+            "validation_samples = 16", "validation_samples = 2").replace("final_time_s = 40.0", "final_time_s = 0.37")
+        head = head.replace("lambda2_values = [0, 3000, 10000, 30000, 100000, 300000, 1000000]",
+                            "lambda2_values = [0, 3000]").replace("gamma_values = [0, 10, 25, 50, 100, 200, 300]",
+                            "gamma_values = [0, 10]")
+        profile = '''
+[[profiles]]
+name = "fixture"
+label = "Fixture"
+purpose = "Causal off-clock reversal"
+start_time_s = 0.13
+power_deficit_mw = 10.0
+changes = [[0.25, -7.0]]
+weight = 1.0
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest, output = root / "plan.toml", root / "study"
+            manifest.write_text(head + profile)
+            with (patch.object(experiment, "load_operating_point", return_value=point),
+                  patch("functional_incentives.plotting.plot_l2_study"),
+                  patch("functional_incentives.plotting.plot_l2_uncertainty_comparison"), redirect_stdout(io.StringIO())):
+                status = lyapunov.run_l2_study(manifest, output)
+                self.assertEqual(status["status"], "awaiting_tso_selection")
+                self.assertFalse((output / "validation_samples.csv").exists())
+                self.assertEqual(len(pd.read_csv(output / "design_samples.csv")), 8)
+                trace = pd.read_csv(output / "design_trajectories/fixture/l2/3000/trajectory.csv")
+                self.assertIn(.13, trace.time_s.tolist())
+                self.assertIn(.25, trace.time_s.tolist())
+                before = (output / "design_samples.csv").read_bytes()
+                reference_hashes = lyapunov._tree_hashes(output)
+                changed_manifest, changed_output = root / "variance.toml", root / "variance"
+                changed_head = head + f'\nreference_study = "{output.as_posix()}"\n'
+                changed_manifest.write_text(changed_head + profile +
+                    '\n[provider_overrides.renewable_uncertain]\nvariance_mw2=1.75\n')
+                changed_status = lyapunov.run_l2_study(changed_manifest, changed_output)
+                self.assertEqual(changed_status["status"], "awaiting_tso_selection")
+                self.assertEqual(lyapunov._tree_hashes(output), reference_hashes)
+                self.assertEqual(json.loads((output / "market.json").read_text()),
+                                 json.loads((changed_output / "market.json").read_text()))
+                quantiles = pd.read_csv(changed_output / "availability_quantiles.csv")
+                from scipy.stats import truncnorm
+                sigma = np.sqrt(1.75)
+                np.testing.assert_allclose(truncnorm.cdf(quantiles.availability_mw,
+                    -2/sigma, 2/sigma, loc=2, scale=sigma), quantiles["quantile"], atol=1e-12)
+                original_bank = pd.read_csv(output / "availability_draws.csv")
+                changed_bank = pd.read_csv(changed_output / "availability_draws.csv")
+                unchanged_columns = [c for c in original_bank if c != "renewable_uncertain"]
+                pd.testing.assert_frame_equal(original_bank[unchanged_columns], changed_bank[unchanged_columns])
+                self.assertFalse((changed_output / "validation_samples.csv").exists())
+                self.assertTrue((changed_output / "uncertainty_comparison.csv").exists())
+                with patch.object(lyapunov, "simulate_l2_candidate", side_effect=AssertionError("unexpected integration")):
+                    lyapunov.run_l2_report(changed_output)
+                self.assertEqual(lyapunov._tree_hashes(output), reference_hashes)
+                bad_manifest = root / "participates.toml"
+                bad_manifest.write_text(changed_manifest.read_text().replace("variance_mw2=1.75", "variance_mw2=1.25"))
+                with self.assertRaisesRegex(ValueError, "exactly one resolved FI provider"):
+                    lyapunov.run_l2_study(bad_manifest, root / "must_not_run")
+                with patch.object(lyapunov, "simulate_l2_candidate", side_effect=AssertionError("unexpected integration")):
+                    lyapunov.run_l2_report(output)
+                    lyapunov.run_l2_study(manifest, output)
+                self.assertEqual((output / "design_samples.csv").read_bytes(), before)
+                manifest.write_text(head + profile + '\n[selection]\nlambda2=3000\ngamma=10\nreason="Reviewed fixture curve"\n')
+                status = lyapunov.run_l2_study(manifest, output)
+                self.assertEqual(status["status"], "selected_policies_validated")
+                self.assertEqual(len(pd.read_csv(output / "validation_samples.csv")), 6)
+                self.assertTrue((output / "validation_paired_differences.csv").exists())
+                manifest.write_text(manifest.read_text().replace("lambda2=3000", "lambda2=0"))
+                with self.assertRaisesRegex(ValueError, "policy changed after selection"):
+                    lyapunov.run_l2_study(manifest, output)
+
+    def test_l2_plan_rejects_duplicate_profiles_bad_clocks_and_untested_selection(self):
+        from functional_incentives.lyapunov import validate_l2_plan
+        plan = tomllib.loads((experiment.PROJECT_ROOT / "configs/lyapunov.toml").read_text())
+        validate_l2_plan(plan)
+        bad = deepcopy(plan)
+        bad["profiles"][1]["name"] = bad["profiles"][0]["name"]
+        with self.assertRaises(ValueError):
+            validate_l2_plan(bad)
+        bad = deepcopy(plan)
+        bad["profiles"][0]["changes"] = [[.5, 0]]
+        with self.assertRaises(ValueError):
+            validate_l2_plan(bad)
+        bad = deepcopy(plan)
+        bad["selection"] = dict(lambda2=13, gamma=50, reason="untested")
+        with self.assertRaisesRegex(ValueError, "tested lambda2"):
+            validate_l2_plan(bad)
+        bad = deepcopy(plan)
+        bad["provider_overrides"] = {"renewable_uncertain": {"variance_mw2": 1.75}}
+        with self.assertRaisesRegex(ValueError, "together"):
+            validate_l2_plan(bad)
+        bad["reference_study"] = "reference"
+        bad["provider_overrides"]["renewable_uncertain"]["mean_mw"] = 1.5
+        with self.assertRaisesRegex(ValueError, "only an explicit positive"):
+            validate_l2_plan(bad)
+
+    def test_lyapunov_equal_budget_preserves_uniform_price_gaps_and_supply_limit(self):
+        from functional_incentives.lyapunov_comparison import match_budget
+        providers = tuple(BlockProvider(identity, identity, 10., 0., 20., 20., 1.,
+            GaussianReserve(2., 0., 2., "truncated"), QuadraticCommitmentCost(0., 0.),
+            0., price, price) for identity, price in (("a", 1.), ("b", 10.)))
+        plant = LinearFrequencyParameters(60., 4., 100., 1.)
+        base = clear_fcr_block(providers, requirement_mw=1., nominal_frequency_hz=60.)
+        config = dict(decision=dict(mode="optimize"), market=dict(mode="clear", minimum_bid_mw=1.),
+                      scenario=dict(droop_pu=.05))
+        result, cleared = match_budget(base, plant, config, 30.)
+        self.assertEqual(result["status"], "matched")
+        self.assertAlmostEqual(cleared.market.requirement_mw, 3.)
+        self.assertAlmostEqual(cleared.market.total_payment_eur, 30.)
+        self.assertEqual(match_budget(base, plant, config, 5.)[0]["status"], "uniform_price_gap")
+        self.assertEqual(match_budget(base, plant, config, 41.)[0]["status"], "insufficient_offer_supply")
+        self.assertEqual(match_budget(base, plant, config, .5)[0]["status"], "below_reference_budget")
+
+    def test_capacity_market_screen_and_quantile_pairing_preserve_roles_and_gains(self):
+        from functional_incentives import fcr_capacity as capacity
+        config = next(c for n, _, c in experiment.configured_scenarios(self.config) if n == "fi_endogenous")
+        settings = tomllib.loads((experiment.PROJECT_ROOT / "configs/fcr_capacity_expanded.toml").read_text())
+        capacity.validate_capacity_settings(settings, config)
+        changed = deepcopy(config)
+        for raw in changed["providers"]:
+            raw.update(settings["provider_overrides"].get(raw["provider_id"], {}))
+        with patch.object(experiment, "load_operating_point", return_value=self.point):
+            _, original, plant = experiment.prepare_experiment(config)
+            _, expanded, same_plant = experiment.prepare_experiment(changed)
+        self.assertEqual(plant, same_plant)
+        self.assertEqual(original.gains_mw_per_hz, expanded.gains_mw_per_hz)
+        screen, blocks, awards = capacity.capacity_markets(expanded, plant, changed, [12, 16, 20, 30])
+        self.assertEqual([r["status"] for r in screen], ["feasible"]*3+["insufficient_offer_supply"])
+        self.assertEqual([blocks[q].market.clearing_price_eur_per_mw_block for q in (12, 16, 20)], [18, 20, 24])
+        self.assertTrue(all(block.participation_modes[-1] == "fi" for block in blocks.values()))
+        self.assertTrue(all(r["quantity_mw"] == 0 for r in awards if r["provider_id"] == "renewable_uncertain"))
+        rng = np.random.default_rng(31)
+        banks = pd.DataFrame([dict(bank=b, sample=i, **{p.provider_id: p.availability.sample_mw(rng)
+            for p in original.providers}) for b in ("design", "validation") for i in range(2)])
+        paired, diagnostics = capacity.map_capacity_banks(banks, original, expanded)
+        self.assertEqual(len(diagnostics), 12)
+        np.testing.assert_array_equal(banks.renewable_uncertain, paired.renewable_uncertain)
+        np.testing.assert_array_equal(banks.renewable_reliable, paired.renewable_reliable)
+        for name in ("conventional_1", "conventional_2", "conventional_3"):
+            np.testing.assert_allclose(paired[name]-banks[name], 4., atol=1e-12, rtol=0)
+        bad = deepcopy(settings)
+        bad["provider_overrides"]["renewable_uncertain"] = dict(reserve_capacity_mw=8., mean_mw=7.98)
+        with self.assertRaisesRegex(ValueError, "conventional"):
+            capacity.validate_capacity_settings(bad, config)
+
+    def test_cli_capacity_modes_require_explicit_inputs(self):
+        from functional_incentives import fcr_capacity as capacity
+        with (patch("sys.argv", ["run_fcr", "--fcr-capacity-study", "--config", "manifest.toml", "--output-dir", "study"]),
+              patch.object(capacity, "run_capacity_study") as run):
+            experiment.main()
+        self.assertEqual(run.call_args.args, (Path("manifest.toml"), Path("study")))
+        with (patch("sys.argv", ["run_fcr", "--fcr-capacity-report", "study"]),
+              patch.object(capacity, "run_capacity_report") as report):
+            experiment.main()
+        self.assertEqual(report.call_args.args, (Path("study"),))
+        for args in (["--fcr-capacity-study"], ["--fcr-capacity-study", "--compare"],
+                     ["--fcr-capacity-report", "study", "--config", "manifest.toml"],
+                     ["--fcr-capacity-study", "--frequency-weight", "1"]):
+            with patch("sys.argv", ["run_fcr", *args]), patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
+                experiment.main()
+
+    def test_lyapunov_comparison_freezes_design_budgets_and_preserves_reference(self):
+        from functional_incentives import lyapunov, lyapunov_comparison as comparison
+        from functional_incentives.grid import AndesOperatingPoint
+        point = AndesOperatingPoint(Path("fixture.xlsx"), 100., 60., 1000.,
+            sum(self.point.generator_active_power_mw), .906095586, self.point.generator_ids,
+            (0, 2, 4, 1, 3), self.point.generator_active_power_mw,
+            (300., 400., 400.), (5., 4., 4.), self.point.generator_ratings_mva)
+        head = (experiment.PROJECT_ROOT / "configs/lyapunov.toml").read_text().split("[[profiles]]")[0]
+        head = head.replace('base_config = "fcr.toml"', f'base_config = "{experiment.DEFAULT_CONFIG_PATH.as_posix()}"')
+        head = head.replace("design_samples = 4", "design_samples = 2").replace("validation_samples = 16", "validation_samples = 2")
+        head = head.replace("workers = 3", "workers = 1").replace("final_time_s = 40.0", "final_time_s = 0.37")
+        head = head.replace("lambda2_values = [0, 3000, 10000, 30000, 100000, 300000, 1000000]", "lambda2_values = [0, 3000]")
+        head = head.replace("gamma_values = [0, 10, 25, 50, 100, 200, 300]", "gamma_values = [0, 10]")
+        profile = '\n[[profiles]]\nname="fixture"\nlabel="Fixture"\npurpose="Source design"\nstart_time_s=0.13\npower_deficit_mw=10.0\nchanges=[[0.25,0.0]]\nweight=1.0\n'
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest, source, out = root / "source.toml", root / "source", root / "comparison"
+            manifest.write_text(head+profile)
+            with (patch.object(experiment, "load_operating_point", return_value=point),
+                  patch("functional_incentives.plotting.plot_l2_study"),
+                  patch("functional_incentives.plotting.plot_policy_pareto"),
+                  patch("functional_incentives.plotting.plot_frozen_comparison"), redirect_stdout(io.StringIO())):
+                lyapunov.run_l2_study(manifest, source)
+                hashes = lyapunov._tree_hashes(source)
+                chosen = root / "comparison.toml"
+                text = f'source_study="{source.as_posix()}"\nworkers=1\ndelivery_seed=1234\nevents_per_block=[1,1000000000]\n'
+                text += '[selection]\nlambda2=3000\ngamma=10\nreason="Fixture design choice"\n'
+                for name in ("short_deficit_pulse", "bipolar_doublet"):
+                    text += f'\n[[demonstrations]]\nname="{name}"\nlabel="{name}"\npurpose="Unseen fixture"\nstart_time_s=0.13\npower_deficit_mw=10.0\nchanges=[[0.22,0.0]]\nfinal_time_s=0.37\n'
+                chosen.write_text(text)
+                comparison.run_comparison(chosen, out)
+                self.assertEqual(json.loads((out / "study_status.json").read_text())["status"], "complete")
+                self.assertEqual(lyapunov._tree_hashes(source), hashes)
+                budgets = pd.read_csv(out / "budget_matches.csv")
+                self.assertIn("insufficient_offer_supply", set(budgets.status))
+                self.assertTrue((abs(budgets[budgets.status == "matched"].design_budget_gap_eur) < 1e-7).all())
+                equal = pd.read_csv(out / "equal_budget_comparison.csv")
+                self.assertTrue((abs(equal[equal.bank == "design"].mean_budget_gap_eur) < 1e-7).all())
+                self.assertIn("validation", set(equal.bank))
+                self.assertTrue((out / "delivery_draw.json").exists())
+                outcomes = (out / "outcomes.csv").read_bytes()
+                with patch.object(comparison, "comparison_trace", side_effect=AssertionError("unexpected integration")):
+                    comparison.run_comparison_report(out)
+                    comparison.run_comparison(chosen, out)
+                self.assertEqual((out / "outcomes.csv").read_bytes(), outcomes)
+                self.assertEqual(lyapunov._tree_hashes(source), hashes)
+                from functional_incentives import fcr_capacity as capacity
+                preserved = lyapunov._tree_hashes(out)
+                for expanded in (False, True):
+                    capacity_manifest = root / f"capacity_{expanded}.toml"
+                    capacity_text = (f'source_comparison="{out.as_posix()}"\nfleet_label="Fixture"\n'
+                        'requirements_mw=[12,20]\nworkers=1\nevents_per_block=1\n[provider_overrides]\n')
+                    if expanded:
+                        for name in ("conventional_1", "conventional_2", "conventional_3"):
+                            capacity_text += f'{name}={{reserve_capacity_mw=8.0,mean_mw=7.98}}\n'
+                    capacity_manifest.write_text(capacity_text)
+                    target = root / f"capacity_{expanded}"
+                    with patch("functional_incentives.plotting.plot_capacity_study"):
+                        capacity.run_capacity_study(capacity_manifest, target)
+                        status = json.loads((target / "study_status.json").read_text())
+                        self.assertEqual(status["status"], "complete")
+                        self.assertEqual(status["imported_outcomes"], 0 if expanded else 45)
+                        screen = pd.read_csv(target / "market_screen.csv")
+                        self.assertEqual(screen.status.iloc[-1], "feasible" if expanded else "insufficient_offer_supply")
+                        equal = pd.read_csv(target / "equal_budget_comparison.csv")
+                        self.assertTrue((equal[equal.bank == "design"].mean_budget_gap_eur.abs() < 1e-7).all())
+                        original_outcomes = pd.read_csv(target / "outcomes.csv").sort_values(capacity.KEYS).reset_index(drop=True)
+                        with patch.object(capacity, "comparison_trace", side_effect=AssertionError("unexpected integration")):
+                            capacity.run_capacity_report(target)
+                            capacity.run_capacity_study(capacity_manifest, target)
+                        resumed_outcomes = pd.read_csv(target / "outcomes.csv").sort_values(capacity.KEYS).reset_index(drop=True)
+                        pd.testing.assert_frame_equal(original_outcomes, resumed_outcomes)
+                        self.assertEqual(lyapunov._tree_hashes(out), preserved)
+                chosen.write_text(text.replace("lambda2=3000", "lambda2=13"))
+                with self.assertRaisesRegex(ValueError, "freeze tested"):
+                    comparison.run_comparison(chosen, out)
 
     def test_procurement_preserves_inputs_references_and_resumes(self):
         from functional_incentives import procurement

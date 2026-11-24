@@ -1,0 +1,8 @@
+# Demand sensitivity on the preserved fleet. Infeasible requirements stay visible.
+source_comparison = "../results/lyapunov_comparison"
+fleet_label = "Original reserve availability"
+requirements_mw = [12, 12.5, 13, 13.5, 14, 16, 18, 20]
+workers = 3
+events_per_block = 1
+
+[provider_overrides]

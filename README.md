@@ -1,5 +1,36 @@
 # Functional Incentives for Frequency Control
 
+The [FCR capacity sensitivity](docs/FCR_CAPACITY_STUDY.md) screens initial
+requirements from 12 to 20 MW with frozen FI policies, original and explicitly
+expanded conventional reserve scenarios, paired independent assessment and
+conditional equal expected spending. Use `--fcr-capacity-study` with
+`configs/fcr_capacity.toml` or `configs/fcr_capacity_expanded.toml`, each in its
+own output directory. New figures show peak absolute RoCoF only. Saved reports
+can be regenerated with `--fcr-capacity-report STUDY_DIR` without simulation.
+
+The [frozen-policy comparison](docs/LYAPUNOV_COMPARISON.md) adds metric-specific
+Pareto views, explicit curve-based gamma=50/lambda2=30000 choices, independent
+disturbance assessment and conditional equal-budget FCR procurement. Use
+`--lyapunov-compare --config configs/lyapunov_comparison.toml --output-dir
+results/lyapunov_comparison`; `--lyapunov-comparison-report` regenerates figures
+from saved outcomes. Equal spending is matched in design expectation with
+explicit events-per-block accounting and independent realized gaps reported.
+
+The opt-in [single-provider Lyapunov L2 study](docs/LYAPUNOV_STUDY.md) implements
+the Week 9 causal target/replay proposal and meaningful synthetic disturbance
+profiles. Run `--lyapunov-study --config configs/lyapunov.toml --output-dir
+results/lyapunov_l2_week10` to build paired L2/bilinear design Pareto curves.
+The TSO then records an explicit coefficient choice before independent
+validation. `--lyapunov-report results/lyapunov_l2_week10` regenerates reports
+without simulation. The original bilinear contract and weighted optimizer
+remain available separately.
+
+The paired [reduced-uncertainty sensitivity](configs/lyapunov_lower_uncertainty.toml)
+lowers only the uncertain provider's Gaussian variance to 1.75 MW^2 while
+retaining its voluntary zero FCR offer. Run the same study mode with this
+manifest and `--output-dir results/lyapunov_l2_lower_uncertainty`; the original
+study stays unchanged and comparison uses common bounded-law quantiles.
+
 ETH Zürich semester project. The implementation covers **provider decisions,
 the FCR capacity market, functional incentives (FI), and coupled frequency
 dynamics**. FI providers optimize their own commands at each decision time.
@@ -15,10 +46,13 @@ path to repeated market cycles. The
 inputs from the current pedagogical assumptions. Calibration and repeated market
 cycles remain planned extensions; [TSO_DESIGN.md](docs/TSO_DESIGN.md) records the
 implemented objective, search method and limits of the numerical conclusions.
-The next research task is **FPP provider optimization**, focusing on zero-sum
-redistribution and a possible tractable Nash equilibrium; its objective,
-information timing and economic inputs remain open. See
-[AEMO_FPP.md](docs/AEMO_FPP.md#next-research-step-fpp-provider-optimization).
+The next research direction is **Lyapunov-based functional incentives**
+(D-041, 6 November 2026), starting from Jonas Matt's theoretical notes.
+The first task is to understand their assumptions and best responses, then
+identify how to adapt them to frequency control with actuator dynamics and
+availability bounds. Further AEMO/FPP game-theory development is not an active
+parallel direction. Existing implementations and results remain available.
+See the [current research plan](docs/NEXT_STEPS.md#current-direction-lyapunov-incentives).
 
 **Repository language:** all project-authored code, comments, configuration labels,
 documentation, local notes, reports, figures and filenames must remain in English.
@@ -455,7 +489,7 @@ on 29 October 2026 after the constant-reference revision. That historical study 
 30 integrations including three numerical refinements and saves physical,
 reference-identity and settlement checks under `results/aemo_fpp_constant/`.
 All 27 matched physical trajectories are unchanged, and the audit preserves
-530 historical files. The Week 7 Beamer source, compiled PDF and audit
+530 historical files. The Week 7 Beamer source and compiled PDF
 are under `results/week7/`; generated results are ignored by Git.
 With the default seed, gamma 50 improves the sampled nadir from 59.919129 to
 59.948176 Hz and yields FI net settlement of EUR 61.4103 and profit of EUR 30.7072
@@ -472,3 +506,28 @@ decimal value is not evidence of a statistically distinct policy.
 Local research PDFs in `references/`
 and notes in `local_context/` are intentionally outside Git. Consult
 `local_context/NOW.md` and `DECISIONS.md` when present.
+
+## Local output organization
+
+Keep completed research studies and their saved inputs under `results/`.
+Temporary checks belong under `tmp/`; both directories are ignored by Git.
+Remove superseded verification attempts once a final checked run is available.
+
+Weekly slide folders contain only editable LaTeX sources, one compiled deck
+PDF, the ETH theme and assets actually used by LaTeX. Build intermediates,
+preview images, duplicate source ZIPs and figure-generation scratch files are
+disposable. Compile twice with `pdflatex` from the deck folder:
+
+| Week | Deck folder | Source | Compiled deck |
+|---|---|---|---|
+| 5 | `results/week5_slides/week5_eth/` | `week5_eth.tex` | `week5_eth.pdf` |
+| 6 | `results/week6_slides/week6_eth/` | `main.tex` | `week6_20_october_2026.pdf` |
+| 7 | `results/week7/slides/` | `main.tex` | `main.pdf` |
+| 8 | `results/week8/slides/` | `main.tex` | `main.pdf` |
+| 9 | `results/week9/slides/` | `main.tex` | `main.pdf` |
+
+For Week 6, use `pdflatex -jobname=week6_20_october_2026 main.tex`.
+The original Week 5 data and plotting source are retained separately in
+`results/archive/week5_reproduction.zip`. Extract them into a working copy of
+the Week 5 deck if figure regeneration is needed. Compiling the existing
+LaTeX sources uses the retained figure PDFs directly.

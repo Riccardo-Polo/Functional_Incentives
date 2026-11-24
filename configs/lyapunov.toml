@@ -1,0 +1,62 @@
+# Week 10 first experiment: synthetic stress profiles, not historical events.
+base_config = "fcr.toml"
+base_scenario = "fi_endogenous"
+seed = 20261113
+design_samples = 4
+validation_samples = 16
+workers = 3
+final_time_s = 40.0
+output_time_step_s = 0.025
+maximum_solver_step_s = 0.05
+relative_tolerance = 1e-11
+absolute_tolerance = 1e-13
+# Computational coverage; the TSO chooses explicitly after inspecting curves.
+# lambda2 has units EUR/Hz^2 per decision interval; gamma has EUR/(Hz MW s).
+lambda2_values = [0, 3000, 10000, 30000, 100000, 300000, 1000000]
+gamma_values = [0, 10, 25, 50, 100, 200, 300]
+# Equal profile weights define an illustrative design mixture only.
+# Costs remain the original fi_endogenous rho=1 for BOTH contracts.
+# No FPP monetary scale is imported and no TSO weighted optimizer is invoked.
+
+[[profiles]]
+name = "sustained_deficit"
+label = "Sustained deficit"
+purpose = "Containment, residual frequency error and persistent activation cost"
+start_time_s = 1.0
+power_deficit_mw = 10.0
+changes = []
+weight = 0.25
+
+[[profiles]]
+name = "temporary_deficit"
+label = "Temporary deficit and recovery"
+purpose = "Unannounced clearance while conventional FCR and FI retain response"
+start_time_s = 1.03
+power_deficit_mw = 10.0
+changes = [[6.07, 0.0]]
+weight = 0.25
+
+[[profiles]]
+name = "deficit_to_surplus"
+label = "Deficit to surplus"
+purpose = "Opposite-direction service after the initial FCR response develops"
+start_time_s = 1.0
+power_deficit_mw = 10.0
+changes = [[20.05, -7.0]]
+weight = 0.25
+
+[[profiles]]
+name = "rapid_reversals"
+label = "Rapid reversals and recovery"
+purpose = "Actuator memory, changing benefit signs and causal forecast errors"
+start_time_s = 1.03
+power_deficit_mw = 10.0
+changes = [[3.07, -7.0], [4.23, 5.0], [6.11, 0.0]]
+weight = 0.25
+
+# Add only after reviewing design curves, with a documented TSO choice:
+# [selection]
+# lambda2 = <tested value>
+# gamma = <tested value>
+# reason = "Explicit TSO rationale based on the saved design Pareto curves"
+# Independent validation starts only after this selection is frozen.

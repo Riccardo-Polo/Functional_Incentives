@@ -1,0 +1,7 @@
+# A separate, conditional one-event comparison for each profile.
+source_design = "../results/lyapunov_l2_lower_uncertainty"
+source_comparison = "../results/lyapunov_comparison"
+profiles = ["sustained_deficit", "moderate_sustained", "short_deficit_pulse"]
+disturbance_rise_s = 0.5
+budget_tolerance_eur = 0.01
+workers = 6
